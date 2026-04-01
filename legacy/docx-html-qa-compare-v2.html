@@ -1,0 +1,1225 @@
+html = r'''<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DOCX vs HTML QA Comparator</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --bg2: #111832;
+      --panel: #141d3a;
+      --panel2: #1b2550;
+      --text: #ebf1ff;
+      --muted: #9fb0dc;
+      --line: rgba(255,255,255,.12);
+      --accent: #7aa2ff;
+      --accent2: #76d1ff;
+      --ok: #34d399;
+      --warn: #f59e0b;
+      --bad: #f87171;
+      --shadow: 0 10px 30px rgba(0,0,0,.25);
+      --radius: 16px;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      background: linear-gradient(180deg, var(--bg) 0%, #0f1730 100%);
+      color: var(--text);
+    }
+    .app {
+      max-width: 1600px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+    .hero {
+      display: grid;
+      grid-template-columns: 1.2fr .8fr;
+      gap: 18px;
+      margin-bottom: 18px;
+    }
+    .card {
+      background: linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.02));
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(6px);
+    }
+    .hero .card { padding: 22px; }
+    h1 {
+      margin: 0 0 10px;
+      font-size: clamp(24px, 3vw, 36px);
+      line-height: 1.08;
+      letter-spacing: -.02em;
+    }
+    .subtitle { color: var(--muted); line-height: 1.5; margin-bottom: 0; }
+    .quick {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0,1fr));
+      gap: 12px;
+    }
+    .quick .mini {
+      padding: 14px;
+      border-radius: 14px;
+      background: rgba(255,255,255,.03);
+      border: 1px solid var(--line);
+    }
+    .mini b { display:block; font-size: 14px; margin-bottom: 6px; color: var(--text); }
+    .mini span { font-size: 12px; color: var(--muted); }
+
+    .controls {
+      display: grid;
+      grid-template-columns: 1fr 1fr auto auto auto;
+      gap: 14px;
+      margin-bottom: 18px;
+      align-items: stretch;
+    }
+    .upload {
+      padding: 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      min-height: 96px;
+    }
+    .upload label {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      cursor: pointer;
+      width: 100%;
+    }
+    .upload input { display: none; }
+    .upl-icon {
+      width: 44px; height: 44px; border-radius: 12px;
+      display:grid; place-items:center;
+      background: linear-gradient(135deg, rgba(122,162,255,.18), rgba(118,209,255,.18));
+      border: 1px solid rgba(122,162,255,.28);
+      flex: 0 0 auto;
+    }
+    .upl-text { min-width: 0; }
+    .upl-title { font-weight: 700; }
+    .upl-sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+    .filename { color: var(--accent2); font-size: 12px; margin-top: 6px; word-break: break-all; }
+    button {
+      border: none;
+      cursor: pointer;
+      padding: 0 18px;
+      border-radius: 14px;
+      min-height: 96px;
+      font-weight: 700;
+      color: var(--text);
+      background: linear-gradient(180deg, #1f3b8c, #1a2f6b);
+      border: 1px solid rgba(122,162,255,.35);
+      box-shadow: var(--shadow);
+      transition: transform .14s ease, opacity .14s ease, filter .14s ease;
+    }
+    button.secondary { background: linear-gradient(180deg, #243055, #1c2544); }
+    button.ghost { background: linear-gradient(180deg, #203b45, #173037); border-color: rgba(118,209,255,.25); }
+    button:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.06); }
+    button:disabled { opacity: .48; cursor: not-allowed; }
+
+    .statusbar {
+      display:flex; gap:12px; align-items:center; flex-wrap: wrap;
+      margin-bottom: 16px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .pill {
+      display:inline-flex; align-items:center; gap:8px; padding:8px 12px;
+      border-radius: 999px; background: rgba(255,255,255,.04); border: 1px solid var(--line);
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+
+    .metrics {
+      display:grid; grid-template-columns: repeat(6, minmax(0,1fr)); gap: 12px; margin-bottom: 18px;
+    }
+    .metric {
+      padding: 16px; min-height: 108px;
+    }
+    .metric .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+    .metric .value { font-size: 30px; font-weight: 800; margin-top: 8px; letter-spacing: -.02em; }
+    .metric .help { color: var(--muted); font-size: 12px; margin-top: 8px; }
+    .ok .value { color: var(--ok); }
+    .warn .value { color: var(--warn); }
+    .bad .value { color: var(--bad); }
+
+    .results-grid {
+      display:grid; grid-template-columns: 1.6fr 1fr 1fr; gap: 16px;
+      min-height: 440px;
+    }
+    .panel-header {
+      display:flex; align-items:flex-start; justify-content:space-between; gap:10px;
+      padding: 16px 16px 0;
+      position: sticky; top: 0; z-index: 2;
+      background: linear-gradient(180deg, rgba(20,29,58,.98), rgba(20,29,58,.92));
+      border-top-left-radius: var(--radius); border-top-right-radius: var(--radius);
+      backdrop-filter: blur(4px);
+    }
+    .panel-header h2 { margin: 0; font-size: 18px; }
+    .panel-sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+    .scroll { max-height: 70vh; overflow: auto; padding: 14px 16px 16px; }
+
+    .match {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      overflow: hidden;
+      margin-bottom: 14px;
+      background: linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.02));
+    }
+    .match-head {
+      display:flex; justify-content:space-between; align-items:center; gap:10px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255,255,255,.03);
+      position: sticky; top: 0;
+    }
+    .score {
+      font-weight: 800; padding: 6px 10px; border-radius: 999px; font-size: 12px;
+      border: 1px solid var(--line); background: rgba(255,255,255,.04);
+    }
+    .score.exact { color: var(--ok); }
+    .score.approx { color: var(--warn); }
+    .score.low { color: var(--bad); }
+    .pair {
+      display:grid; grid-template-columns: 1fr 1fr;
+      gap: 0;
+    }
+    .side {
+      padding: 12px 14px 14px;
+      min-height: 150px;
+    }
+    .side + .side { border-left: 1px solid var(--line); }
+    .side h3 { margin: 0 0 10px; font-size: 13px; color: var(--accent2); text-transform: uppercase; letter-spacing: .06em; }
+    .content {
+      white-space: pre-wrap; line-height: 1.55; font-size: 14px;
+      background: rgba(255,255,255,.02); border: 1px solid rgba(255,255,255,.06); border-radius: 12px; padding: 12px;
+      color: #f4f7ff;
+    }
+    .meta {
+      display:flex; gap: 8px; flex-wrap: wrap; margin-top: 10px;
+    }
+    .tag {
+      padding: 5px 8px; font-size: 11px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted);
+      background: rgba(255,255,255,.03);
+    }
+    .diffs { margin-top: 10px; font-size: 13px; color: var(--muted); }
+    .diffs b { color: var(--text); }
+
+    .unmatched-item {
+      padding: 12px; border: 1px solid var(--line); border-radius: 14px; margin-bottom: 12px; background: rgba(255,255,255,.025);
+    }
+    .unmatched-item .idx { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+    .unmatched-item .txt { white-space: pre-wrap; line-height: 1.5; font-size: 14px; }
+    .empty {
+      padding: 22px; color: var(--muted); text-align: center; border: 1px dashed var(--line); border-radius: 14px; background: rgba(255,255,255,.02);
+    }
+    .footer-note { color: var(--muted); font-size: 12px; line-height: 1.5; margin-top: 12px; }
+    .toolbar {
+      display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:12px;
+    }
+    .toolbar input[type="search"] {
+      width: 260px; max-width: 100%;
+      background: rgba(255,255,255,.04); color: var(--text); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px;
+      outline: none;
+    }
+    .toolbar select {
+      background: rgba(255,255,255,.04); color: var(--text); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px;
+      outline: none;
+    }
+    .link-btn {
+      background: none; border: none; color: var(--accent2); cursor:pointer; padding:0; min-height:auto; box-shadow:none;
+    }
+    .small { font-size: 12px; color: var(--muted); }
+    @media (max-width: 1180px) {
+      .hero, .results-grid, .controls, .metrics { grid-template-columns: 1fr; }
+      button { min-height: 58px; }
+      .upload { min-height: 82px; }
+      .pair { grid-template-columns: 1fr; }
+      .side + .side { border-left: none; border-top: 1px solid var(--line); }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <section class="hero">
+      <div class="card">
+        <h1>DOCX ↔ HTML QA Comparator</h1>
+        <p class="subtitle">
+          Upload one <b>.docx</b> and one saved <b>.html/.htm</b> file to compare visible, meaningful content side by side.
+          The app extracts paragraphs, table cells, headings, list items, and inline emphasis, then finds exact and approximate matches,
+          flags structural/formatting differences, and exports results as JSON — all locally in your browser.
+        </p>
+      </div>
+      <div class="card quick">
+        <div class="mini"><b>Fast extraction</b><span>Reads only the DOCX parts needed for text and light formatting. Exact-match indexing keeps large compares responsive.</span></div>
+        <div class="mini"><b>Smart matching</b><span>Uses normalized exact matches first, then limits approximate candidates with token and length filters.</span></div>
+        <div class="mini"><b>QA-focused</b><span>Summaries, matched blocks, unmatched sections, formatting deltas, search, filters, and JSON export.</span></div>
+        <div class="mini"><b>Browser-only</b><span>No backend, no installation, and no file upload to any server. Everything stays on your machine.</span></div>
+      </div>
+    </section>
+
+    <section class="controls">
+      <div class="card upload">
+        <label for="docxFile">
+          <span class="upl-icon">📄</span>
+          <span class="upl-text">
+            <div class="upl-title">Upload Word document (.docx)</div>
+            <div class="upl-sub">Extracts paragraphs and table cells with light structure/formatting metadata.</div>
+            <div class="filename" id="docxName">No file selected</div>
+          </span>
+          <input id="docxFile" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
+        </label>
+      </div>
+      <div class="card upload">
+        <label for="htmlFile">
+          <span class="upl-icon">🌐</span>
+          <span class="upl-text">
+            <div class="upl-title">Upload saved webpage (.html/.htm)</div>
+            <div class="upl-sub">Extracts visible blocks, list items, and table cells from the document body.</div>
+            <div class="filename" id="htmlName">No file selected</div>
+          </span>
+          <input id="htmlFile" type="file" accept=".html,.htm,text/html" />
+        </label>
+      </div>
+      <button id="compareBtn" disabled>Compare</button>
+      <button id="resetBtn" class="secondary">Reset</button>
+      <button id="exportBtn" class="ghost" disabled>Export JSON</button>
+    </section>
+
+    <div class="statusbar">
+      <span class="pill"><span class="dot"></span><span id="statusText">Ready. Select both files to begin.</span></span>
+      <span class="small" id="perfText"></span>
+    </div>
+
+    <section class="metrics" id="metrics">
+      <div class="card metric"><div class="label">DOCX blocks</div><div class="value" id="mDocx">0</div><div class="help">Paragraphs + table cells</div></div>
+      <div class="card metric"><div class="label">HTML blocks</div><div class="value" id="mHtml">0</div><div class="help">Visible text blocks + table cells</div></div>
+      <div class="card metric ok"><div class="label">Exact matches</div><div class="value" id="mExact">0</div><div class="help">Normalized text matched exactly</div></div>
+      <div class="card metric warn"><div class="label">Approx matches</div><div class="value" id="mApprox">0</div><div class="help">High-confidence approximate matches</div></div>
+      <div class="card metric bad"><div class="label">DOCX only</div><div class="value" id="mDocxOnly">0</div><div class="help">Unmatched DOCX blocks</div></div>
+      <div class="card metric bad"><div class="label">HTML only</div><div class="value" id="mHtmlOnly">0</div><div class="help">Unmatched HTML blocks</div></div>
+    </section>
+
+    <section class="results-grid">
+      <div class="card">
+        <div class="panel-header">
+          <div>
+            <h2>Matched blocks</h2>
+            <div class="panel-sub">Side-by-side content with similarity score and formatting/structure differences</div>
+          </div>
+          <div class="toolbar">
+            <input id="searchBox" type="search" placeholder="Search within results..." />
+            <select id="filterMode">
+              <option value="all">All matches</option>
+              <option value="exact">Exact only</option>
+              <option value="approx">Approx only</option>
+              <option value="fmt">Formatting differences only</option>
+            </select>
+          </div>
+        </div>
+        <div class="scroll" id="matchesPanel"><div class="empty">No results yet.</div></div>
+      </div>
+      <div class="card">
+        <div class="panel-header">
+          <div>
+            <h2>Unmatched in DOCX</h2>
+            <div class="panel-sub">Content found in the Word file but not matched to HTML</div>
+          </div>
+        </div>
+        <div class="scroll" id="docxOnlyPanel"><div class="empty">No results yet.</div></div>
+      </div>
+      <div class="card">
+        <div class="panel-header">
+          <div>
+            <h2>Unmatched in HTML</h2>
+            <div class="panel-sub">Content found in the webpage file but not matched to DOCX</div>
+          </div>
+        </div>
+        <div class="scroll" id="htmlOnlyPanel"><div class="empty">No results yet.</div></div>
+      </div>
+    </section>
+
+    <div class="footer-note">
+      Notes: the DOCX parser reads only the XML parts needed for text and light formatting signals (paragraph style, bold, italic, underline, list/table context). Custom Word styles and CSS-driven HTML visibility may require best-effort interpretation because the app runs fully offline without a rendering engine or backend.
+    </div>
+  </div>
+
+  <script>
+    (() => {
+      'use strict';
+
+      // ---------- DOM refs ----------
+      const els = {
+        docxFile: document.getElementById('docxFile'),
+        htmlFile: document.getElementById('htmlFile'),
+        docxName: document.getElementById('docxName'),
+        htmlName: document.getElementById('htmlName'),
+        compareBtn: document.getElementById('compareBtn'),
+        resetBtn: document.getElementById('resetBtn'),
+        exportBtn: document.getElementById('exportBtn'),
+        statusText: document.getElementById('statusText'),
+        perfText: document.getElementById('perfText'),
+        matchesPanel: document.getElementById('matchesPanel'),
+        docxOnlyPanel: document.getElementById('docxOnlyPanel'),
+        htmlOnlyPanel: document.getElementById('htmlOnlyPanel'),
+        searchBox: document.getElementById('searchBox'),
+        filterMode: document.getElementById('filterMode'),
+        mDocx: document.getElementById('mDocx'),
+        mHtml: document.getElementById('mHtml'),
+        mExact: document.getElementById('mExact'),
+        mApprox: document.getElementById('mApprox'),
+        mDocxOnly: document.getElementById('mDocxOnly'),
+        mHtmlOnly: document.getElementById('mHtmlOnly'),
+      };
+
+      const state = {
+        docxFile: null,
+        htmlFile: null,
+        docxBlocks: [],
+        htmlBlocks: [],
+        results: null,
+        exportPayload: null,
+        renderLimitMatches: 120,
+        renderLimitUnmatched: 200,
+      };
+
+      const WORD_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+      const BLOCK_TAGS = new Set(['P','LI','TD','TH','H1','H2','H3','H4','H5','H6','CAPTION','BLOCKQUOTE','PRE','FIGCAPTION']);
+      const SKIP_TAGS = new Set(['SCRIPT','STYLE','NOSCRIPT','TEMPLATE','SVG','CANVAS','HEAD','META','LINK','IFRAME','OBJECT']);
+
+      // ---------- utilities ----------
+      const now = () => performance.now();
+      const timeFmt = ms => `${ms.toFixed(1)} ms`;
+      const esc = s => String(s || '').replace(/[&<>\"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+      const unique = arr => [...new Set(arr)];
+      const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
+      const toArray = x => Array.prototype.slice.call(x || []);
+      const textFromNode = n => (n && (n.textContent || '')) || '';
+
+      function setStatus(msg, perf='') {
+        els.statusText.textContent = msg;
+        els.perfText.textContent = perf;
+      }
+
+      function normalizeText(text) {
+        return String(text || '')
+          .replace(/\u00A0/g, ' ')
+          .replace(/[\u2018\u2019]/g, "'")
+          .replace(/[\u201C\u201D]/g, '"')
+          .replace(/[‐ ‒–—]/g, '-')
+          .replace(/&nbsp;/gi, ' ')
+          .replace(/&amp;/gi, '&')
+          .replace(/&lt;/gi, '<')
+          .replace(/&gt;/gi, '>')
+          // Ignore spacing-only differences in numeric/table content.
+          .replace(/([$€£¥~])\s+(?=\d)/g, '$1')
+          .replace(/\(\s+(?=\d)/g, '(')
+          .replace(/(\d)\s+%/g, '$1%')
+          .replace(/(\d)\s+\)/g, '$1)')
+          .replace(/([+-])\s+(?=\d)/g, '$1')
+          .replace(/\bwww\./gi, '')
+          .replace(/[ \t\r\n\f\v]+/g, ' ')
+          .trim()
+          .toLowerCase();
+      }
+
+      function visibleMeaningful(text) {
+        if (!text) return false;
+        const t = normalizeText(text);
+        if (!t) return false;
+        if (t.length < 2) return false;
+        // filter blocks that are almost only punctuation
+        return /[\p{L}\p{N}]/u.test(t);
+      }
+
+      function tokenize(text) {
+        const s = normalizeText(text).replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+        if (!s) return [];
+        return s.split(/\s+/).filter(Boolean);
+      }
+
+      function bigrams(text) {
+        const s = normalizeText(text).replace(/\s+/g, ' ');
+        const out = [];
+        for (let i = 0; i < s.length - 1; i++) out.push(s.slice(i, i + 2));
+        return out;
+      }
+
+      function jaccardTokens(a, b) {
+        const A = new Set(tokenize(a));
+        const B = new Set(tokenize(b));
+        if (!A.size && !B.size) return 1;
+        let inter = 0;
+        for (const v of A) if (B.has(v)) inter++;
+        const union = A.size + B.size - inter;
+        return union ? inter / union : 0;
+      }
+
+      function diceBigrams(a, b) {
+        const A = bigrams(a);
+        const B = bigrams(b);
+        if (!A.length && !B.length) return 1;
+        const counts = new Map();
+        for (const g of A) counts.set(g, (counts.get(g) || 0) + 1);
+        let inter = 0;
+        for (const g of B) {
+          const c = counts.get(g) || 0;
+          if (c > 0) { inter++; counts.set(g, c - 1); }
+        }
+        return (2 * inter) / (A.length + B.length || 1);
+      }
+
+      function similarity(a, b) {
+        const jt = jaccardTokens(a, b);
+        const db = diceBigrams(a, b);
+        const lenRatio = Math.min(a.length, b.length) / Math.max(a.length, b.length, 1);
+        return clamp((jt * 0.55) + (db * 0.35) + (lenRatio * 0.10), 0, 1);
+      }
+
+      function summarizeFormattingDiff(a, b) {
+        const diffs = [];
+        const keys = ['heading', 'bold', 'italic', 'underline', 'listItem', 'tableCell'];
+        const labels = { heading:'heading', bold:'bold', italic:'italic', underline:'underline', listItem:'list', tableCell:'table-cell' };
+        for (const k of keys) {
+          if (!!a[k] !== !!b[k]) diffs.push(labels[k]);
+        }
+        if ((a.headingLevel || 0) !== (b.headingLevel || 0) && (a.heading || b.heading)) {
+          diffs.push(`heading level ${a.headingLevel || 0}→${b.headingLevel || 0}`);
+        }
+        if ((a.blockType || '') !== (b.blockType || '')) diffs.push(`block type ${a.blockType}→${b.blockType}`);
+        return unique(diffs);
+      }
+
+      function tagsForBlock(block) {
+        const tags = [];
+        if (block.blockType) tags.push(block.blockType);
+        if (block.heading) tags.push(`heading${block.headingLevel ? ' h' + block.headingLevel : ''}`);
+        if (block.bold) tags.push('bold');
+        if (block.italic) tags.push('italic');
+        if (block.underline) tags.push('underline');
+        if (block.listItem) tags.push('list');
+        if (block.tableCell) tags.push('table-cell');
+        if (block.tablePos) tags.push(`r${block.tablePos.row + 1}c${block.tablePos.col + 1}`);
+        if (block.path) tags.push(block.path);
+        return tags;
+      }
+
+      function tablePosKey(block) {
+        if (!block?.tableCell || !block.tablePos) return '';
+        return `${block.tablePos.table ?? 0}:${block.tablePos.row ?? -1}:${block.tablePos.col ?? -1}`;
+      }
+
+      function splitLeadLabelText(text, meta = {}) {
+        const lines = String(text || '').split(/\n+/).map(s => s.trim()).filter(Boolean);
+        if (meta.tableCell || lines.length < 2) return null;
+        const lead = lines[0];
+        const rest = lines.slice(1).join(' ').trim();
+        if (!rest) return null;
+        const leadWords = lead.split(/\s+/).filter(Boolean).length;
+        const looksLikeLeadLabel = lead.length <= 64 && leadWords <= 8 && !/[.!?:;]$/.test(lead);
+        const bodyLooksSubstantial = rest.length >= 80;
+        return looksLikeLeadLabel && bodyLooksSubstantial ? { lead, rest } : null;
+      }
+
+      function updateButtons() {
+        els.compareBtn.disabled = !(state.docxFile && state.htmlFile);
+        els.exportBtn.disabled = !state.exportPayload;
+      }
+
+      // ---------- ZIP reader for DOCX ----------
+      function readU16(view, o) { return view.getUint16(o, true); }
+      function readU32(view, o) { return view.getUint32(o, true); }
+
+      async function inflateRaw(bytes) {
+        if (!('DecompressionStream' in window)) {
+          throw new Error('This browser does not support DecompressionStream required for offline DOCX parsing. Use a recent Chromium-based browser or Safari 17.4+.' );
+        }
+        const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+        return new Uint8Array(await new Response(stream).arrayBuffer());
+      }
+
+      async function unzipSelect(arrayBuffer, wantedNames) {
+        const bytes = new Uint8Array(arrayBuffer);
+        const view = new DataView(arrayBuffer);
+        let eocd = -1;
+        for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 66000); i--) {
+          if (bytes[i] === 0x50 && bytes[i+1] === 0x4b && bytes[i+2] === 0x05 && bytes[i+3] === 0x06) { eocd = i; break; }
+        }
+        if (eocd < 0) throw new Error('ZIP end-of-central-directory not found.');
+        const cdSize = readU32(view, eocd + 12);
+        const cdOffset = readU32(view, eocd + 16);
+        const decoder = new TextDecoder();
+        const found = new Map();
+        let ptr = cdOffset;
+        const end = cdOffset + cdSize;
+        const wanted = new Set(wantedNames);
+
+        while (ptr < end) {
+          if (readU32(view, ptr) !== 0x02014b50) break;
+          const method = readU16(view, ptr + 10);
+          const compressedSize = readU32(view, ptr + 20);
+          const fileNameLen = readU16(view, ptr + 28);
+          const extraLen = readU16(view, ptr + 30);
+          const commentLen = readU16(view, ptr + 32);
+          const localHeaderOffset = readU32(view, ptr + 42);
+          const nameStart = ptr + 46;
+          const name = decoder.decode(bytes.slice(nameStart, nameStart + fileNameLen));
+          if (wanted.has(name)) {
+            const lh = localHeaderOffset;
+            if (readU32(view, lh) !== 0x04034b50) throw new Error('Bad ZIP local header: ' + name);
+            const lfNameLen = readU16(view, lh + 26);
+            const lfExtraLen = readU16(view, lh + 28);
+            const dataStart = lh + 30 + lfNameLen + lfExtraLen;
+            const comp = bytes.slice(dataStart, dataStart + compressedSize);
+            let out;
+            if (method === 0) out = comp;
+            else if (method === 8) out = await inflateRaw(comp);
+            else throw new Error('Unsupported ZIP compression method ' + method + ' for ' + name);
+            found.set(name, decoder.decode(out));
+            if (found.size === wanted.size) break;
+          }
+          ptr += 46 + fileNameLen + extraLen + commentLen;
+        }
+        return found;
+      }
+
+      // ---------- DOCX parsing ----------
+      function q(node, tagName) {
+        return node ? node.getElementsByTagNameNS(WORD_NS, tagName) : [];
+      }
+
+      function childElsByLocalName(node, localName) {
+        return toArray(node?.childNodes).filter(n => n.nodeType === 1 && n.localName === localName);
+      }
+
+      function collectWordText(p) {
+        let text = '';
+        let bold = false, italic = false, underline = false;
+        const runs = childElsByLocalName(p, 'r').concat(childElsByLocalName(p, 'hyperlink').flatMap(h => childElsByLocalName(h, 'r')));
+        for (const r of runs) {
+          const tNodes = childElsByLocalName(r, 't');
+          for (const t of tNodes) text += textFromNode(t);
+          if (childElsByLocalName(r, 'tab').length) text += '\t';
+          if (childElsByLocalName(r, 'br').length || childElsByLocalName(r, 'cr').length) text += '\n';
+          const rPr = childElsByLocalName(r, 'rPr')[0];
+          if (rPr) {
+            if (childElsByLocalName(rPr, 'b').length) bold = true;
+            if (childElsByLocalName(rPr, 'i').length) italic = true;
+            if (childElsByLocalName(rPr, 'u').length) underline = true;
+          }
+        }
+        return { text: text.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim(), bold, italic, underline };
+      }
+
+      function parseDocxDocumentXml(xmlText) {
+        const xml = new DOMParser().parseFromString(xmlText, 'application/xml');
+        const body = xml.getElementsByTagNameNS(WORD_NS, 'body')[0];
+        if (!body) throw new Error('DOCX document body not found.');
+        const blocks = [];
+        let order = 0;
+        let tableOrdinal = 0;
+
+        for (const child of toArray(body.childNodes)) {
+          if (child.nodeType !== 1) continue;
+          if (child.localName === 'p') {
+            const pPr = childElsByLocalName(child, 'pPr')[0];
+            const pStyleVal = childElsByLocalName(pPr, 'pStyle')[0]?.getAttributeNS(WORD_NS, 'val') || childElsByLocalName(pPr, 'pStyle')[0]?.getAttribute('w:val') || childElsByLocalName(pPr, 'pStyle')[0]?.getAttribute('val') || '';
+            const hasNumPr = !!childElsByLocalName(pPr, 'numPr')[0];
+            const { text, bold, italic, underline } = collectWordText(child);
+            if (!visibleMeaningful(text)) continue;
+            const headingMatch = /heading\s*([1-6])?/i.exec(pStyleVal || '') || /title/i.test(pStyleVal || '') && ['title'];
+            const heading = !!headingMatch;
+            const headingLevel = Array.isArray(headingMatch) && headingMatch[1] ? Number(headingMatch[1]) : (heading ? 1 : 0);
+            blocks.push({
+              id: `docx-${order}`,
+              order,
+              source: 'docx',
+              blockType: hasNumPr ? 'paragraph/list-item' : (heading ? 'paragraph/heading' : 'paragraph'),
+              text,
+              normalized: normalizeText(text),
+              bold, italic, underline,
+              heading,
+              headingLevel,
+              listItem: hasNumPr || /list/i.test(pStyleVal || ''),
+              tableCell: false,
+              path: `body > p:nth-of-type(${order + 1})`,
+            });
+            order++;
+          } else if (child.localName === 'tbl') {
+            const rows = childElsByLocalName(child, 'tr');
+            rows.forEach((tr, rIdx) => {
+              const cells = childElsByLocalName(tr, 'tc');
+              cells.forEach((tc, cIdx) => {
+                let textParts = [];
+                let bold = false, italic = false, underline = false, heading = false, listItem = false, headingLevel = 0;
+                for (const tcChild of toArray(tc.childNodes)) {
+                  if (tcChild.nodeType !== 1 || tcChild.localName !== 'p') continue;
+                  const pPr = childElsByLocalName(tcChild, 'pPr')[0];
+                  const pStyleVal = childElsByLocalName(pPr, 'pStyle')[0]?.getAttributeNS(WORD_NS, 'val') || childElsByLocalName(pPr, 'pStyle')[0]?.getAttribute('w:val') || childElsByLocalName(pPr, 'pStyle')[0]?.getAttribute('val') || '';
+                  if (!!childElsByLocalName(pPr, 'numPr')[0] || /list/i.test(pStyleVal || '')) listItem = true;
+                  const hm = /heading\s*([1-6])?/i.exec(pStyleVal || '') || /title/i.test(pStyleVal || '') && ['title'];
+                  if (hm) { heading = true; headingLevel = hm[1] ? Number(hm[1]) : 1; }
+                  const piece = collectWordText(tcChild);
+                  if (piece.text) textParts.push(piece.text);
+                  bold = bold || piece.bold; italic = italic || piece.italic; underline = underline || piece.underline;
+                }
+                const text = textParts.join('\n').trim();
+                if (!visibleMeaningful(text)) return;
+                blocks.push({
+                  id: `docx-${order}`,
+                  order,
+                  source: 'docx',
+                  blockType: 'table-cell',
+                  text,
+                  normalized: normalizeText(text),
+                  bold, italic, underline,
+                  heading,
+                  headingLevel,
+                  listItem,
+                  tableCell: true,
+                  tablePos: { table: tableOrdinal, row: rIdx, col: cIdx },
+                  path: `body > table > tr:nth-of-type(${rIdx + 1}) > td:nth-of-type(${cIdx + 1})`,
+                });
+                order++;
+              });
+            });
+            tableOrdinal++;
+          }
+        }
+        return blocks;
+      }
+
+      async function extractDocxBlocks(file) {
+        const buf = await file.arrayBuffer();
+        const parts = await unzipSelect(buf, ['word/document.xml']);
+        const docXml = parts.get('word/document.xml');
+        if (!docXml) throw new Error('word/document.xml not found in DOCX.');
+        return parseDocxDocumentXml(docXml);
+      }
+
+      // ---------- HTML parsing ----------
+      function isElementVisible(el) {
+        if (!el || el.nodeType !== 1) return false;
+        if (el.hidden || el.getAttribute('aria-hidden') === 'true') return false;
+        const style = (el.getAttribute('style') || '').toLowerCase();
+        if (style.includes('display:none') || style.includes('visibility:hidden') || style.includes('opacity:0')) return false;
+        return true;
+      }
+
+      function nearest(el, tagNames) {
+        let cur = el;
+        while (cur && cur.nodeType === 1) {
+          if (tagNames.has(cur.tagName)) return cur;
+          cur = cur.parentElement;
+        }
+        return null;
+      }
+
+      function blockPath(el) {
+        const parts = [];
+        let cur = el;
+        while (cur && cur.nodeType === 1 && cur.tagName !== 'BODY') {
+          const tag = cur.tagName.toLowerCase();
+          let idx = 1;
+          let prev = cur.previousElementSibling;
+          while (prev) { if (prev.tagName === cur.tagName) idx++; prev = prev.previousElementSibling; }
+          parts.unshift(`${tag}:nth-of-type(${idx})`);
+          cur = cur.parentElement;
+        }
+        return 'body > ' + parts.join(' > ');
+      }
+
+      function extractHtmlBlocks(fileText) {
+        const doc = new DOMParser().parseFromString(fileText, 'text/html');
+        const body = doc.body;
+        if (!body) throw new Error('HTML body not found.');
+        const blocks = [];
+        let order = 0;
+        const seen = new WeakSet();
+
+        const walker = doc.createTreeWalker(body, NodeFilter.SHOW_ELEMENT, {
+          acceptNode(node) {
+            if (SKIP_TAGS.has(node.tagName)) return NodeFilter.FILTER_REJECT;
+            if (!isElementVisible(node)) return NodeFilter.FILTER_REJECT;
+            return NodeFilter.FILTER_ACCEPT;
+          }
+        });
+
+        let node = walker.currentNode;
+        while (node) {
+          if (BLOCK_TAGS.has(node.tagName) && !seen.has(node)) {
+            seen.add(node);
+            let text = (node.innerText || node.textContent || '').replace(/\u00A0/g, ' ').trim();
+            if (visibleMeaningful(text)) {
+              const tag = node.tagName;
+              const headingLevel = /^H([1-6])$/.test(tag) ? Number(tag[1]) : 0;
+              const listItem = tag === 'LI';
+              const tableCell = tag === 'TD' || tag === 'TH';
+              const tableEl = tableCell ? nearest(node, new Set(['TABLE'])) : null;
+              const trEl = tableCell ? nearest(node, new Set(['TR'])) : null;
+              const tableRows = tableEl ? Array.from(tableEl.querySelectorAll('tr')) : [];
+              const cellSiblings = trEl ? Array.from(trEl.children).filter(el => el.tagName === 'TD' || el.tagName === 'TH') : [];
+              const inlineBold = !!node.querySelector('b,strong');
+              const inlineItalic = !!node.querySelector('i,em');
+              const inlineUnderline = !!node.querySelector('u');
+              const style = (node.getAttribute('style') || '').toLowerCase();
+              const baseBlock = {
+                source: 'html',
+                blockType: tableCell ? 'table-cell' : (listItem ? 'list-item' : (headingLevel ? 'heading' : tag.toLowerCase())),
+                bold: inlineBold || /font-weight\s*:\s*(bold|[6-9]00)/.test(style),
+                italic: inlineItalic || /font-style\s*:\s*italic/.test(style),
+                underline: inlineUnderline || /text-decoration[^;]*underline/.test(style),
+                heading: headingLevel > 0,
+                headingLevel,
+                listItem,
+                tableCell,
+                path: blockPath(node),
+                tablePos: tableCell && tableEl && trEl ? {
+                  table: Math.max(0, Array.from(doc.querySelectorAll('table')).indexOf(tableEl)),
+                  row: Math.max(0, tableRows.indexOf(trEl)),
+                  col: Math.max(0, cellSiblings.indexOf(node))
+                } : undefined,
+              };
+              const split = splitLeadLabelText(text, baseBlock);
+              if (split) {
+                blocks.push({
+                  id: `html-${order}`,
+                  order,
+                  text: split.lead,
+                  normalized: normalizeText(split.lead),
+                  ...baseBlock,
+                });
+                order++;
+                blocks.push({
+                  id: `html-${order}`,
+                  order,
+                  text: split.rest,
+                  normalized: normalizeText(split.rest),
+                  ...baseBlock,
+                  bold: false,
+                  italic: false,
+                  underline: false,
+                  heading: false,
+                  headingLevel: 0,
+                });
+                order++;
+              } else {
+                blocks.push({
+                  id: `html-${order}`,
+                  order,
+                  text,
+                  normalized: normalizeText(text),
+                  ...baseBlock,
+                });
+                order++;
+              }
+            }
+          }
+          node = walker.nextNode();
+        }
+        return blocks;
+      }
+
+      // ---------- Matching ----------
+      function buildHtmlIndices(htmlBlocks) {
+        const exactMap = new Map();
+        const tokenIndex = new Map();
+        const lengthBuckets = new Map();
+        const tablePosMap = new Map();
+
+        htmlBlocks.forEach((b, idx) => {
+          if (!b.normalized) return;
+          if (!exactMap.has(b.normalized)) exactMap.set(b.normalized, []);
+          exactMap.get(b.normalized).push(idx);
+          const posKey = tablePosKey(b);
+          if (posKey) {
+            if (!tablePosMap.has(posKey)) tablePosMap.set(posKey, []);
+            tablePosMap.get(posKey).push(idx);
+          }
+
+          const toks = unique(tokenize(b.normalized).filter(t => t.length >= 3)).slice(0, 20);
+          for (const t of toks) {
+            if (!tokenIndex.has(t)) tokenIndex.set(t, []);
+            tokenIndex.get(t).push(idx);
+          }
+          const bucket = Math.max(1, Math.round(b.normalized.length / 30));
+          if (!lengthBuckets.has(bucket)) lengthBuckets.set(bucket, []);
+          lengthBuckets.get(bucket).push(idx);
+        });
+        return { exactMap, tokenIndex, lengthBuckets, tablePosMap };
+      }
+
+      function getApproxCandidates(docBlock, htmlBlocks, indices, usedHtml) {
+        const tableKey = tablePosKey(docBlock);
+        if (tableKey && indices.tablePosMap.has(tableKey)) {
+          return (indices.tablePosMap.get(tableKey) || []).filter(idx => !usedHtml.has(idx));
+        }
+        const toks = unique(tokenize(docBlock.normalized).filter(t => t.length >= 3));
+        toks.sort((a,b) => (indices.tokenIndex.get(a)?.length || 9999) - (indices.tokenIndex.get(b)?.length || 9999));
+        const chosen = toks.slice(0, 3);
+        let cands = new Set();
+        for (const t of chosen) {
+          const arr = indices.tokenIndex.get(t) || [];
+          for (let i = 0; i < arr.length && cands.size < 80; i++) cands.add(arr[i]);
+        }
+        if (!cands.size) {
+          const b = Math.max(1, Math.round(docBlock.normalized.length / 30));
+          for (let k = b - 1; k <= b + 1; k++) {
+            for (const idx of indices.lengthBuckets.get(k) || []) {
+              cands.add(idx);
+              if (cands.size >= 80) break;
+            }
+          }
+        }
+        const len = docBlock.normalized.length;
+        return [...cands].filter(idx => {
+          if (usedHtml.has(idx)) return false;
+          const h = htmlBlocks[idx];
+          const hLen = h.normalized.length || 1;
+          const ratio = Math.min(len, hLen) / Math.max(len, hLen);
+          return ratio >= 0.45;
+        }).slice(0, 60);
+      }
+
+      function compareBlocks(docxBlocks, htmlBlocks) {
+        const t0 = now();
+        const indices = buildHtmlIndices(htmlBlocks);
+        const usedHtml = new Set();
+        const matches = [];
+        const unmatchedDocx = [];
+
+        for (let i = 0; i < docxBlocks.length; i++) {
+          const d = docxBlocks[i];
+          if (!d.normalized) { unmatchedDocx.push(d); continue; }
+          const exactByPos = tablePosKey(d)
+            ? (indices.tablePosMap.get(tablePosKey(d)) || []).find(idx => !usedHtml.has(idx) && htmlBlocks[idx].normalized === d.normalized)
+            : undefined;
+          if (exactByPos !== undefined) {
+            usedHtml.add(exactByPos);
+            const h = htmlBlocks[exactByPos];
+            const diffs = summarizeFormattingDiff(d, h);
+            matches.push({
+              matchType: 'exact',
+              score: 1,
+              docxIndex: i,
+              htmlIndex: exactByPos,
+              docx: d,
+              html: h,
+              formattingDiffs: diffs,
+            });
+            continue;
+          }
+          const exact = tablePosKey(d)
+            ? undefined
+            : (indices.exactMap.get(d.normalized) || []).find(idx => !usedHtml.has(idx));
+          if (exact !== undefined) {
+            usedHtml.add(exact);
+            const h = htmlBlocks[exact];
+            const diffs = summarizeFormattingDiff(d, h);
+            matches.push({
+              matchType: 'exact',
+              score: 1,
+              docxIndex: i,
+              htmlIndex: exact,
+              docx: d,
+              html: h,
+              formattingDiffs: diffs,
+            });
+            continue;
+          }
+
+          const cands = getApproxCandidates(d, htmlBlocks, indices, usedHtml);
+          let best = null;
+          let bestScore = 0;
+          for (const idx of cands) {
+            const h = htmlBlocks[idx];
+            const score = similarity(d.normalized, h.normalized);
+            if (score > bestScore) { bestScore = score; best = idx; }
+          }
+          if (best !== null && bestScore >= 0.72) {
+            usedHtml.add(best);
+            const h = htmlBlocks[best];
+            const diffs = summarizeFormattingDiff(d, h);
+            matches.push({
+              matchType: 'approx',
+              score: bestScore,
+              docxIndex: i,
+              htmlIndex: best,
+              docx: d,
+              html: h,
+              formattingDiffs: diffs,
+            });
+          } else {
+            unmatchedDocx.push(d);
+          }
+        }
+
+        const unmatchedHtml = htmlBlocks.filter((_, idx) => !usedHtml.has(idx));
+        matches.sort((a,b) => (a.matchType === b.matchType ? b.score - a.score : a.matchType === 'exact' ? -1 : 1));
+        const exactCount = matches.filter(m => m.matchType === 'exact').length;
+        const approxCount = matches.length - exactCount;
+        return {
+          matches,
+          unmatchedDocx,
+          unmatchedHtml,
+          metrics: {
+            docxBlocks: docxBlocks.length,
+            htmlBlocks: htmlBlocks.length,
+            exactCount,
+            approxCount,
+            docxOnly: unmatchedDocx.length,
+            htmlOnly: unmatchedHtml.length,
+            formatDiffCount: matches.filter(m => m.formattingDiffs.length).length,
+            elapsedMs: now() - t0,
+          }
+        };
+      }
+
+      // ---------- Rendering ----------
+      function updateMetrics(metrics) {
+        els.mDocx.textContent = String(metrics?.docxBlocks || 0);
+        els.mHtml.textContent = String(metrics?.htmlBlocks || 0);
+        els.mExact.textContent = String(metrics?.exactCount || 0);
+        els.mApprox.textContent = String(metrics?.approxCount || 0);
+        els.mDocxOnly.textContent = String(metrics?.docxOnly || 0);
+        els.mHtmlOnly.textContent = String(metrics?.htmlOnly || 0);
+      }
+
+      function renderMatches() {
+        const results = state.results;
+        const panel = els.matchesPanel;
+        panel.innerHTML = '';
+        if (!results?.matches?.length) {
+          panel.innerHTML = '<div class="empty">No matches found.</div>';
+          return;
+        }
+
+        const q = normalizeText(els.searchBox.value || '');
+        const mode = els.filterMode.value;
+        const filtered = results.matches.filter(m => {
+          if (mode === 'exact' && m.matchType !== 'exact') return false;
+          if (mode === 'approx' && m.matchType !== 'approx') return false;
+          if (mode === 'fmt' && !m.formattingDiffs.length) return false;
+          if (!q) return true;
+          return m.docx.normalized.includes(q) || m.html.normalized.includes(q);
+        });
+
+        const frag = document.createDocumentFragment();
+        const slice = filtered.slice(0, state.renderLimitMatches);
+        for (const m of slice) {
+          const div = document.createElement('div');
+          const scoreClass = m.matchType === 'exact' ? 'exact' : (m.score >= 0.85 ? 'approx' : 'low');
+          div.className = 'match';
+          div.innerHTML = `
+            <div class="match-head">
+              <div>
+                <div><b>${m.matchType === 'exact' ? 'Exact match' : 'Approximate match'}</b></div>
+                <div class="small">DOCX #${m.docx.order + 1} ↔ HTML #${m.html.order + 1}</div>
+              </div>
+              <div class="score ${scoreClass}">${m.matchType === 'exact' ? '100%' : Math.round(m.score * 100) + '%'}</div>
+            </div>
+            <div class="pair">
+              <div class="side">
+                <h3>DOCX</h3>
+                <div class="content">${esc(m.docx.text)}</div>
+                <div class="meta">${tagsForBlock(m.docx).map(t => `<span class="tag">${esc(t)}</span>`).join('')}</div>
+              </div>
+              <div class="side">
+                <h3>HTML</h3>
+                <div class="content">${esc(m.html.text)}</div>
+                <div class="meta">${tagsForBlock(m.html).map(t => `<span class="tag">${esc(t)}</span>`).join('')}</div>
+              </div>
+            </div>
+            <div class="side" style="border-top:1px solid var(--line); min-height:auto;">
+              <div class="diffs"><b>Formatting/structure differences:</b> ${m.formattingDiffs.length ? esc(m.formattingDiffs.join(', ')) : 'None detected'}</div>
+            </div>
+          `;
+          frag.appendChild(div);
+        }
+        panel.appendChild(frag);
+
+        if (filtered.length > slice.length) {
+          const more = document.createElement('div');
+          more.className = 'empty';
+          more.innerHTML = `Showing ${slice.length} of ${filtered.length} matches. <button class="link-btn" id="loadMoreMatches">Load more</button>`;
+          panel.appendChild(more);
+          more.querySelector('#loadMoreMatches').addEventListener('click', () => {
+            state.renderLimitMatches += 120;
+            renderMatches();
+          });
+        }
+      }
+
+      function renderUnmatched(panel, items, label) {
+        panel.innerHTML = '';
+        if (!items?.length) {
+          panel.innerHTML = `<div class="empty">No unmatched ${label.toLowerCase()} blocks.</div>`;
+          return;
+        }
+        const frag = document.createDocumentFragment();
+        const slice = items.slice(0, state.renderLimitUnmatched);
+        for (const b of slice) {
+          const div = document.createElement('div');
+          div.className = 'unmatched-item';
+          div.innerHTML = `
+            <div class="idx">#${b.order + 1} · ${esc(b.blockType)}</div>
+            <div class="txt">${esc(b.text)}</div>
+            <div class="meta" style="margin-top:8px;">${tagsForBlock(b).map(t => `<span class="tag">${esc(t)}</span>`).join('')}</div>
+          `;
+          frag.appendChild(div);
+        }
+        panel.appendChild(frag);
+        if (items.length > slice.length) {
+          const more = document.createElement('div');
+          more.className = 'empty';
+          more.innerHTML = `Showing ${slice.length} of ${items.length} unmatched ${label.toLowerCase()} blocks. <button class="link-btn">Load more</button>`;
+          more.querySelector('button').addEventListener('click', () => {
+            state.renderLimitUnmatched += 200;
+            renderAll();
+          });
+          panel.appendChild(more);
+        }
+      }
+
+      function renderAll() {
+        updateMetrics(state.results?.metrics || null);
+        renderMatches();
+        renderUnmatched(els.docxOnlyPanel, state.results?.unmatchedDocx || [], 'DOCX');
+        renderUnmatched(els.htmlOnlyPanel, state.results?.unmatchedHtml || [], 'HTML');
+      }
+
+      function buildExportPayload() {
+        if (!state.results) return null;
+        const r = state.results;
+        return {
+          metadata: {
+            createdAt: new Date().toISOString(),
+            docxFile: state.docxFile?.name || null,
+            htmlFile: state.htmlFile?.name || null,
+            version: '1.0.0',
+          },
+          metrics: r.metrics,
+          matches: r.matches.map(m => ({
+            matchType: m.matchType,
+            score: Number(m.score.toFixed(4)),
+            formattingDiffs: m.formattingDiffs,
+            docx: m.docx,
+            html: m.html,
+          })),
+          unmatchedDocx: r.unmatchedDocx,
+          unmatchedHtml: r.unmatchedHtml,
+        };
+      }
+
+      function downloadJson(data, filename='comparison-results.json') {
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = filename; a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+
+      // ---------- Actions ----------
+      async function doCompare() {
+        if (!(state.docxFile && state.htmlFile)) return;
+        state.renderLimitMatches = 120;
+        state.renderLimitUnmatched = 200;
+        state.results = null;
+        state.exportPayload = null;
+        updateButtons();
+        renderAll();
+
+        const tAll = now();
+        try {
+          setStatus('Reading files…');
+          const [docxBlocks, htmlText] = await Promise.all([
+            extractDocxBlocks(state.docxFile),
+            state.htmlFile.text(),
+          ]);
+          setStatus('Extracting HTML blocks…');
+          const htmlBlocks = extractHtmlBlocks(htmlText);
+
+          state.docxBlocks = docxBlocks;
+          state.htmlBlocks = htmlBlocks;
+
+          setStatus('Comparing blocks…');
+          const results = compareBlocks(docxBlocks, htmlBlocks);
+          state.results = results;
+          state.exportPayload = buildExportPayload();
+          updateButtons();
+          renderAll();
+
+          const totalMs = now() - tAll;
+          setStatus(
+            `Done. ${results.metrics.exactCount} exact and ${results.metrics.approxCount} approximate matches found.`,
+            `Extraction + compare: ${timeFmt(totalMs)} (match engine: ${timeFmt(results.metrics.elapsedMs)})`
+          );
+        } catch (err) {
+          console.error(err);
+          setStatus(`Error: ${err?.message || String(err)}`);
+        }
+      }
+
+      function resetAll() {
+        state.docxFile = null;
+        state.htmlFile = null;
+        state.docxBlocks = [];
+        state.htmlBlocks = [];
+        state.results = null;
+        state.exportPayload = null;
+        state.renderLimitMatches = 120;
+        state.renderLimitUnmatched = 200;
+        els.docxFile.value = '';
+        els.htmlFile.value = '';
+        els.docxName.textContent = 'No file selected';
+        els.htmlName.textContent = 'No file selected';
+        els.searchBox.value = '';
+        els.filterMode.value = 'all';
+        updateButtons();
+        updateMetrics(null);
+        els.matchesPanel.innerHTML = '<div class="empty">No results yet.</div>';
+        els.docxOnlyPanel.innerHTML = '<div class="empty">No results yet.</div>';
+        els.htmlOnlyPanel.innerHTML = '<div class="empty">No results yet.</div>';
+        setStatus('Ready. Select both files to begin.');
+      }
+
+      // ---------- Event wiring ----------
+      els.docxFile.addEventListener('change', e => {
+        const file = e.target.files?.[0] || null;
+        state.docxFile = file;
+        els.docxName.textContent = file ? `${file.name} · ${(file.size/1024).toFixed(1)} KB` : 'No file selected';
+        updateButtons();
+      });
+      els.htmlFile.addEventListener('change', e => {
+        const file = e.target.files?.[0] || null;
+        state.htmlFile = file;
+        els.htmlName.textContent = file ? `${file.name} · ${(file.size/1024).toFixed(1)} KB` : 'No file selected';
+        updateButtons();
+      });
+      els.compareBtn.addEventListener('click', doCompare);
+      els.resetBtn.addEventListener('click', resetAll);
+      els.exportBtn.addEventListener('click', () => {
+        if (!state.exportPayload) return;
+        const base1 = (state.docxFile?.name || 'docx').replace(/\.[^.]+$/, '');
+        const base2 = (state.htmlFile?.name || 'html').replace(/\.[^.]+$/, '');
+        downloadJson(state.exportPayload, `${base1}__vs__${base2}__comparison.json`);
+      });
+      els.searchBox.addEventListener('input', () => { state.renderLimitMatches = 120; renderMatches(); });
+      els.filterMode.addEventListener('change', () => { state.renderLimitMatches = 120; renderMatches(); });
+
+      resetAll();
+    })();
+  </script>
+</body>
+</html>
+'''
+
+path = '/mnt/data/docx_html_qa_comparator.html'
+with open(path, 'w', encoding='utf-8') as f:
+    f.write(html)
+
+print(path)
+print(len(html))
