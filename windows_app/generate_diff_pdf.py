@@ -75,6 +75,16 @@ INLINE_ITALIC_TAGS = {"i", "em"}
 INLINE_UNDERLINE_TAGS = {"u"}
 DIFF_TOKEN_RE = re.compile(r"\d[\d,]*(?:\.\d+)?%?|\.\d+%?|[A-Za-z]+(?:[’'\-][A-Za-z]+)*")
 CURRENCY_SYMBOL_RE = re.compile(r"([$€£¥])\s*(?=\(?\d)")
+LEADING_FOOTNOTE_MARKER_RE = re.compile(r"^\s*\(?\d{1,2}\)?(?=\s+[A-Za-z])\s*")
+TRAILING_FOOTNOTE_MARKER_RE = re.compile(r"(?<=[A-Za-z])\d{1,2}(?=\s*$)")
+LEADING_ROW_PUNCTUATION_RE = re.compile(r"^[\s'\"`‘’“”\-–—•]+")
+LEADING_MARKER_LINE_RE = re.compile(r"^\s*[-–—•]+\s*")
+LEADING_LABEL_SYMBOL_RE = re.compile(r"^\s*[%\-–—•]+\s*(?=[A-Za-z])")
+DATE_PHRASE_RE = re.compile(
+    r"\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|"
+    r"Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},\s+\d{4}\b",
+    flags=re.I,
+)
 WINDOWS_TESSERACT_CANDIDATES = [
     Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe"),
     Path(r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"),
@@ -237,6 +247,8 @@ def numeric_value_compatibility(doc_token: DiffToken, target_token: DiffToken) -
 
 
 def table_context_match_score(doc_block: Block, html_block: Block) -> float:
+    if normalize_for_compare(strip_leading_markers(doc_block.text)) == normalize_for_compare(strip_leading_markers(html_block.text)):
+        return 1.0
     score = similarity(doc_block.normalized, html_block.normalized)
     doc_token = single_value_token(doc_block)
     html_token = single_value_token(html_block)
@@ -293,8 +305,17 @@ def normalize_text(text: str) -> str:
     )
 
 
-def normalize_for_compare(text: str) -> str:
+def strip_footnote_markers(text: str) -> str:
     text = normalize_text(text)
+    text = LEADING_FOOTNOTE_MARKER_RE.sub("", text)
+    if re.search(r"[A-Za-z]", text):
+        text = re.sub(r"\(\s*\d{1,2}\s*\)\s*$", "", text)
+        text = TRAILING_FOOTNOTE_MARKER_RE.sub("", text)
+    return text.strip()
+
+
+def normalize_for_compare(text: str) -> str:
+    text = strip_footnote_markers(text)
     text = re.sub(r"\bwww\.", "", text, flags=re.I)
     text = re.sub(r"\(\s+(?=\d)", "(", text)
     text = re.sub(r"(\d)\s+%", r"\1%", text)
@@ -304,11 +325,132 @@ def normalize_for_compare(text: str) -> str:
 
 
 def normalize_row_key(text: str) -> str:
-    text = normalize_text(text)
+    text = strip_footnote_markers(text)
+    text = LEADING_ROW_PUNCTUATION_RE.sub("", text)
     text = re.sub(r"\(\s*\d+\s*\)", "", text)
     text = re.sub(r"\[\s*\d+\s*\]", "", text)
     text = re.sub(r"\s+", " ", text).strip()
     return normalize_for_compare(text)
+
+
+def strip_leading_markers(text: str) -> str:
+    lines = normalize_text(text).splitlines() or [normalize_text(text)]
+    cleaned: list[str] = []
+    for line in lines:
+        line = LEADING_MARKER_LINE_RE.sub("", line)
+        if re.fullmatch(r"\s*%?\s*of total\s*", line, flags=re.I):
+            line = re.sub(r"^\s*%+\s*", "", line)
+        else:
+            line = LEADING_LABEL_SYMBOL_RE.sub("", line)
+        cleaned.append(line)
+    return "\n".join(cleaned).strip()
+
+
+def normalize_without_punctuation(text: str) -> str:
+    cleaned = normalize_for_compare(strip_leading_markers(text))
+    cleaned = re.sub(r"[^0-9a-z]+", " ", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def normalize_without_footnote_refs(text: str) -> str:
+    cleaned = normalize_text(text)
+    cleaned = re.sub(r"\(\s*\d+\s*\)", "", cleaned)
+    cleaned = re.sub(r"(?<=[A-Za-z])\)", "", cleaned)
+    cleaned = re.sub(r"\(\s*$", "", cleaned)
+    return normalize_for_compare(cleaned)
+
+
+def normalize_pdf_paragraph_artifacts(text: str) -> str:
+    cleaned = normalize_text(text)
+    cleaned = re.sub(r"([A-Za-z])-\s*\n\s*([A-Za-z])", r"\1-\2", cleaned)
+    cleaned = re.sub(r"(?:\n\s*)+\d{1,2}\s*$", "", cleaned)
+    return normalize_for_compare(cleaned)
+
+
+def detect_dash_like_gap(
+    left_rect: tuple[float, float, float, float],
+    right_rect: tuple[float, float, float, float],
+    *,
+    page_width: float,
+    page_height: float,
+    pixmap: Any | None,
+) -> bool:
+    if pixmap is None:
+        return False
+    gap_width = right_rect[0] - left_rect[2]
+    if gap_width < 2.0 or gap_width > 18.0:
+        return False
+    word_height = min(left_rect[3] - left_rect[1], right_rect[3] - right_rect[1])
+    if word_height <= 0:
+        return False
+    center_y = ((left_rect[1] + left_rect[3]) / 2 + (right_rect[1] + right_rect[3]) / 2) / 2
+    band_height = max(1.5, min(5.0, word_height * 0.35))
+    x0 = max(0.0, left_rect[2] + 0.6)
+    x1 = min(page_width, right_rect[0] - 0.6)
+    y0 = max(0.0, center_y - band_height / 2)
+    y1 = min(page_height, center_y + band_height / 2)
+    if x1 <= x0 or y1 <= y0:
+        return False
+
+    scale_x = pixmap.width / max(page_width, 1.0)
+    scale_y = pixmap.height / max(page_height, 1.0)
+    px0 = max(0, min(pixmap.width - 1, int(x0 * scale_x)))
+    px1 = max(0, min(pixmap.width, int(x1 * scale_x)))
+    py0 = max(0, min(pixmap.height - 1, int(y0 * scale_y)))
+    py1 = max(0, min(pixmap.height, int(y1 * scale_y)))
+    if px1 - px0 < 2 or py1 - py0 < 1:
+        return False
+
+    samples = pixmap.samples
+    stride = pixmap.stride
+    threshold = 180
+    longest_run = 0
+    dark_rows = 0
+    for py in range(py0, py1):
+        row = samples[py * stride : py * stride + stride]
+        current_run = 0
+        row_longest = 0
+        dark_pixels = 0
+        for px in range(px0, px1):
+            value = row[px]
+            if value < threshold:
+                dark_pixels += 1
+                current_run += 1
+                row_longest = max(row_longest, current_run)
+            else:
+                current_run = 0
+        if dark_pixels:
+            dark_rows += 1
+        longest_run = max(longest_run, row_longest)
+
+    width_px = px1 - px0
+    height_px = py1 - py0
+    if dark_rows == 0:
+        return False
+    return (
+        longest_run >= max(3, int(width_px * 0.35))
+        and dark_rows <= max(4, int(height_px * 0.75))
+    )
+
+
+def join_words_for_pdf_cluster(
+    words: list[dict[str, Any]],
+    *,
+    page_width: float,
+    page_height: float,
+    pixmap: Any | None = None,
+) -> str:
+    if not words:
+        return ""
+    parts = [str(words[0]["text"]).strip()]
+    prev = words[0]
+    for word in words[1:]:
+        separator = " "
+        if detect_dash_like_gap(prev["rect"], word["rect"], page_width=page_width, page_height=page_height, pixmap=pixmap):
+            separator = " - "
+        parts.append(separator + str(word["text"]).strip())
+        prev = word
+    return "".join(parts).strip()
 
 
 def diff_token_kind(token: str) -> str:
@@ -337,13 +479,20 @@ def diff_tokens(text: str) -> list[DiffToken]:
             if not candidate.isalnum():
                 prefix_symbol = candidate
         token_text = match.group(0)
+        token_end = match.end()
+        if diff_token_kind(token_text) == "number" and not token_text.endswith("%"):
+            suffix = normalized_text[token_end:]
+            percent_match = re.match(r"(\s+)%(?=\s|$|[),.;:])", suffix)
+            if percent_match:
+                token_text = token_text + "%"
+                token_end += percent_match.end()
         tokens.append(
             DiffToken(
                 text=token_text,
                 normalized=normalize_diff_token(token_text),
                 kind=diff_token_kind(token_text),
                 start=match.start(),
-                end=match.end(),
+                end=token_end,
                 spaces_before=spaces_before,
                 prefix_symbol=prefix_symbol,
             )
@@ -377,6 +526,82 @@ def semantic_currency_hint(block: Block) -> str | None:
         "net income per diluted share",
     )
     return "$" if any(marker in row_key for marker in currency_row_markers) else None
+
+
+def table_context_currency_hint(block: Block, blocks: list[Block]) -> str | None:
+    if not block.table_cell or block.table_pos is None:
+        return None
+    row_key = block.row_key or ""
+    if not row_key:
+        return None
+    token = single_value_token(block)
+    if token is None or token.kind != "number":
+        return None
+    parsed = parse_numeric_token(token.text)
+    if parsed is not None:
+        numeric_value, _is_percent = parsed
+        if abs(numeric_value) < 100 and "," not in token.text:
+            return None
+    non_currency_row_markers = (
+        "shares used in computing",
+        "outstanding shares",
+        "shares outstanding",
+        "tax rate",
+        "effective tax rate",
+        "% of total",
+        "operating margin",
+    )
+    if any(marker in row_key for marker in non_currency_row_markers):
+        return None
+    page_index, row_index, _col_index = block.table_pos
+    nearby_percent = 0
+    nearby_explicit = 0
+    for peer in blocks:
+        if not peer.table_cell or peer.table_pos is None:
+            continue
+        peer_page, peer_row, _ = peer.table_pos
+        if peer_page != page_index or abs(peer_row - row_index) > 6:
+            continue
+        peer_token = single_value_token(peer)
+        if peer_token is not None and peer_token.kind == "number" and peer_token.text.endswith("%"):
+            nearby_percent += 1
+        if extract_currency_symbol(peer.text):
+            nearby_explicit += 1
+    if nearby_percent >= 2:
+        return None
+    for peer in blocks:
+        if not peer.table_cell or peer.table_pos is None:
+            continue
+        peer_page, peer_row, _ = peer.table_pos
+        if peer_page != page_index or abs(peer_row - row_index) > 6:
+            continue
+        if extract_currency_symbol(peer.text):
+            if nearby_explicit >= 1 and (
+                semantic_currency_hint(block)
+                or any(
+                    marker in row_key
+                    for marker in (
+                        "revenue",
+                        "expense",
+                        "expenses",
+                        "income",
+                        "loss",
+                        "amortization",
+                        "compensation",
+                        "charges",
+                        "acquisition/divestiture",
+                        "adjustment",
+                        "cash flow",
+                        "capital expenditures",
+                        "debt",
+                        "liabilities",
+                        "assets",
+                        "equity",
+                    )
+                )
+            ):
+                return "$"
+    return None
 
 
 def tesseract_from_runtime_config() -> Path | None:
@@ -518,6 +743,26 @@ def token_subsequence_ratio(fragment: str, container: str) -> float:
     return matched / len(fragment_tokens)
 
 
+def pdf_block_has_docx_anchor(block: Block, docx_blocks: list[Block]) -> bool:
+    if not visible_meaningful(block.text):
+        return False
+    if len(tokenize(block.text)) < 3 and len(block.normalized) < 24:
+        return False
+    block_norm = normalize_without_footnote_refs(block.text)
+    for doc_block in docx_blocks:
+        doc_norm = normalize_without_footnote_refs(doc_block.text)
+        if not doc_norm:
+            continue
+        if doc_norm == block_norm:
+            return True
+        if similarity(block_norm, doc_norm) >= 0.9:
+            return True
+        overlap = max(token_overlap_ratio(block_norm, doc_norm), token_overlap_ratio(doc_norm, block_norm))
+        if overlap >= 0.82:
+            return True
+    return False
+
+
 def short_fragment_subsequence_similarity(fragment_tokens: list[str], container_tokens: list[str]) -> float:
     if not fragment_tokens or not container_tokens:
         return 0.0
@@ -603,12 +848,14 @@ def collect_word_text(paragraph: ET.Element) -> tuple[str, bool, bool, bool]:
     italic = False
     underline = False
     for run in paragraph.findall(".//w:r", WORD_NS):
-        for t in run.findall("w:t", WORD_NS):
-            text_parts.append(t.text or "")
-        for tab in run.findall("w:tab", WORD_NS):
-            text_parts.append("\t")
-        for br in run.findall("w:br", WORD_NS):
-            text_parts.append("\n")
+        for child in list(run):
+            local = xml_local_name(child.tag) if isinstance(child.tag, str) else ""
+            if local == "t":
+                text_parts.append(child.text or "")
+            elif local == "tab":
+                text_parts.append("\t")
+            elif local == "br":
+                text_parts.append("\n")
         run_props = run.find("w:rPr", WORD_NS)
         if run_props is None:
             continue
@@ -621,39 +868,28 @@ def collect_word_text(paragraph: ET.Element) -> tuple[str, bool, bool, bool]:
     return "".join(text_parts), bold, italic, underline
 
 
-def extract_docx_blocks(path: Path) -> list[Block]:
-    with zipfile.ZipFile(path) as archive:
-        xml_text = archive.read("word/document.xml")
-    root = ET.fromstring(xml_text)
-    body = root.find("w:body", WORD_NS)
-    if body is None:
-        return []
+def extract_docx_footnote_blocks(archive: zipfile.ZipFile, order_start: int) -> tuple[list[Block], int]:
+    try:
+        xml_text = archive.read("word/footnotes.xml")
+    except KeyError:
+        return [], order_start
 
+    root = ET.fromstring(xml_text)
     blocks: list[Block] = []
-    order = 0
-    table_ordinal = 0
-    for child in body:
-        local = xml_local_name(child.tag)
-        if local == "p":
-            para_props = child.find("w:pPr", WORD_NS)
-            style_val = ""
-            list_item = False
-            if para_props is not None:
-                style = para_props.find("w:pStyle", WORD_NS)
-                if style is not None:
-                    style_val = (
-                        style.get(f"{{{WORD_NS['w']}}}val", "")
-                        or style.get("w:val", "")
-                        or style.get("val", "")
-                    )
-                list_item = para_props.find("w:numPr", WORD_NS) is not None
-            text, bold, italic, underline = collect_word_text(child)
+    order = order_start
+    for footnote in root.findall("w:footnote", WORD_NS):
+        footnote_type = (
+            footnote.get(f"{{{WORD_NS['w']}}}type")
+            or footnote.get("w:type")
+            or footnote.get("type")
+            or ""
+        )
+        if footnote_type in {"separator", "continuationSeparator", "continuationNotice"}:
+            continue
+        for paragraph in footnote.findall(".//w:p", WORD_NS):
+            text, bold, italic, underline = collect_word_text(paragraph)
             if not visible_meaningful(text):
                 continue
-            heading_match = re.search(r"heading\s*([1-6])?", style_val, flags=re.I)
-            is_title = re.search(r"title", style_val, flags=re.I)
-            heading = bool(heading_match or is_title)
-            heading_level = int(heading_match.group(1)) if heading_match and heading_match.group(1) else 1 if is_title else None
             blocks.append(
                 Block(
                     id=f"docx-{order}",
@@ -661,78 +897,131 @@ def extract_docx_blocks(path: Path) -> list[Block]:
                     order=order,
                     text=normalize_text(text).strip(),
                     normalized=normalize_for_compare(text),
-                    heading=heading,
-                    heading_level=heading_level,
                     bold=bold,
                     italic=italic,
                     underline=underline,
-                    list_item=list_item,
-                    kind="p",
+                    kind="footnote",
                 )
             )
             order += 1
-        elif local == "tbl":
-            for row in child.findall(".//w:tr", WORD_NS):
-                row_index = list(child.findall(".//w:tr", WORD_NS)).index(row)
-                row_cells: list[tuple[int, str, bool, bool, bool]] = []
-                for col_index, cell in enumerate(row.findall("w:tc", WORD_NS)):
-                    cell_parts: list[str] = []
-                    bold = False
-                    italic = False
-                    underline = False
-                    for paragraph in cell.findall("w:p", WORD_NS):
-                        text, p_bold, p_italic, p_underline = collect_word_text(paragraph)
-                        if visible_meaningful(text):
-                            cell_parts.append(normalize_text(text).strip())
-                        bold = bold or p_bold
-                        italic = italic or p_italic
-                        underline = underline or p_underline
-                    cell_text = "\n".join(part for part in cell_parts if part)
-                    row_cells.append((col_index, cell_text, bold, italic, underline))
-                row_key = next(
-                    (normalize_row_key(text) for _col_index, text, _bold, _italic, _underline in row_cells if visible_meaningful(text)),
-                    None,
+    return blocks, order
+
+
+def extract_docx_blocks(path: Path) -> list[Block]:
+    with zipfile.ZipFile(path) as archive:
+        xml_text = archive.read("word/document.xml")
+        root = ET.fromstring(xml_text)
+        body = root.find("w:body", WORD_NS)
+        if body is None:
+            return []
+
+        blocks: list[Block] = []
+        order = 0
+        table_ordinal = 0
+        for child in body:
+            local = xml_local_name(child.tag)
+            if local == "p":
+                para_props = child.find("w:pPr", WORD_NS)
+                style_val = ""
+                list_item = False
+                if para_props is not None:
+                    style = para_props.find("w:pStyle", WORD_NS)
+                    if style is not None:
+                        style_val = (
+                            style.get(f"{{{WORD_NS['w']}}}val", "")
+                            or style.get("w:val", "")
+                            or style.get("val", "")
+                        )
+                    list_item = para_props.find("w:numPr", WORD_NS) is not None
+                text, bold, italic, underline = collect_word_text(child)
+                if not visible_meaningful(text):
+                    continue
+                heading_match = re.search(r"heading\s*([1-6])?", style_val, flags=re.I)
+                is_title = re.search(r"title", style_val, flags=re.I)
+                heading = bool(heading_match or is_title)
+                heading_level = int(heading_match.group(1)) if heading_match and heading_match.group(1) else 1 if is_title else None
+                blocks.append(
+                    Block(
+                        id=f"docx-{order}",
+                        source="docx",
+                        order=order,
+                        text=normalize_text(text).strip(),
+                        normalized=normalize_for_compare(text),
+                        heading=heading,
+                        heading_level=heading_level,
+                        bold=bold,
+                        italic=italic,
+                        underline=underline,
+                        list_item=list_item,
+                        kind="p",
+                    )
                 )
-                row_slot = 0
-                numeric_slot = 0
-                for col_index, cell_text, bold, italic, underline in row_cells:
-                    if not visible_meaningful(cell_text):
-                        continue
-                    token = single_value_token(
-                        Block(
-                            id="",
-                            source="docx",
-                            order=0,
-                            text=cell_text,
-                            normalized=normalize_for_compare(cell_text),
-                        )
+                order += 1
+            elif local == "tbl":
+                rows = child.findall(".//w:tr", WORD_NS)
+                for row_index, row in enumerate(rows):
+                    row_cells: list[tuple[int, str, bool, bool, bool]] = []
+                    for col_index, cell in enumerate(row.findall("w:tc", WORD_NS)):
+                        cell_parts: list[str] = []
+                        bold = False
+                        italic = False
+                        underline = False
+                        for paragraph in cell.findall(".//w:p", WORD_NS):
+                            text, p_bold, p_italic, p_underline = collect_word_text(paragraph)
+                            if visible_meaningful(text):
+                                cell_parts.append(normalize_text(text).strip())
+                            bold = bold or p_bold
+                            italic = italic or p_italic
+                            underline = underline or p_underline
+                        cell_text = "\n".join(part for part in cell_parts if part)
+                        row_cells.append((col_index, cell_text, bold, italic, underline))
+                    row_key = next(
+                        (normalize_row_key(text) for _col_index, text, _bold, _italic, _underline in row_cells if visible_meaningful(text)),
+                        None,
                     )
-                    cell_numeric_slot = None
-                    if token is not None and token.kind == "number":
-                        cell_numeric_slot = numeric_slot
-                        numeric_slot += 1
-                    blocks.append(
-                        Block(
-                            id=f"docx-{order}",
-                            source="docx",
-                            order=order,
-                            text=cell_text,
-                            normalized=normalize_for_compare(cell_text),
-                            bold=bold,
-                            italic=italic,
-                            underline=underline,
-                            table_cell=True,
-                            kind="td",
-                            table_pos=(table_ordinal, row_index, col_index),
-                            row_key=row_key,
-                            row_slot=row_slot,
-                            numeric_slot=cell_numeric_slot,
+                    row_slot = 0
+                    numeric_slot = 0
+                    for col_index, cell_text, bold, italic, underline in row_cells:
+                        if not visible_meaningful(cell_text):
+                            continue
+                        token = single_value_token(
+                            Block(
+                                id="",
+                                source="docx",
+                                order=0,
+                                text=cell_text,
+                                normalized=normalize_for_compare(cell_text),
+                            )
                         )
-                    )
-                    order += 1
-                    row_slot += 1
-            table_ordinal += 1
-    return blocks
+                        cell_numeric_slot = None
+                        if token is not None and token.kind == "number":
+                            cell_numeric_slot = numeric_slot
+                            numeric_slot += 1
+                        blocks.append(
+                            Block(
+                                id=f"docx-{order}",
+                                source="docx",
+                                order=order,
+                                text=cell_text,
+                                normalized=normalize_for_compare(cell_text),
+                                bold=bold,
+                                italic=italic,
+                                underline=underline,
+                                table_cell=True,
+                                kind="td",
+                                table_pos=(table_ordinal, row_index, col_index),
+                                row_key=row_key,
+                                row_slot=row_slot,
+                                numeric_slot=cell_numeric_slot,
+                            )
+                        )
+                        order += 1
+                        row_slot += 1
+                table_ordinal += 1
+
+        footnote_blocks, order = extract_docx_footnote_blocks(archive, order)
+        blocks.extend(footnote_blocks)
+        return blocks
 
 
 def get_descendant_text(element: ET.Element) -> str:
@@ -1257,12 +1546,22 @@ def is_pdf_chrome_text(text: str) -> bool:
     compact = re.sub(r"\s+", " ", normalize_text(text)).strip()
     if not normalized:
         return True
+    if "donnelley financial" in normalized:
+        return True
+    if "form 8-k" in normalized and "synopsys, inc." in normalized:
+        return True
     chrome_patterns = [
         r"^\d{1,2}/\d{1,2}/\d{2,4},? \d{1,2}:\d{2} ?[ap]m$",
         r"^\d+/\d+$",
+        r"^page \d+ of \d+$",
         r"^8-k$",
         r"^ex-?99\.1$",
         r"^ex-?99\.1 .*ex-?99\.1$",
+        r"^exhibit 99\.1$",
+        r"^[a-z]{2,}-w\d+-pf-\d+$",
+        r"^\d{2}\.\d{2}\.\d{2}\.\d$",
+        r"^[a-z0-9_-]{2,} \d{2}\.\d{2}\.\d{2}\.\d$",
+        r"^[a-z0-9-]{4,} \d{2}\.\d{2}\.\d{2}\.\d$",
         r"^https?[:/].*sec\.gov/archives/edgar/.*$",
     ]
     return any(re.fullmatch(pattern, normalized) for pattern in chrome_patterns) or compact in {"1", "2", "3", "4", "5", "6", "7"}
@@ -1306,7 +1605,9 @@ def cluster_words_into_blocks(
     *,
     page_number: int,
     page_width: float,
+    page_height: float,
     order_start: int,
+    pixmap: Any | None = None,
 ) -> tuple[list[Block], dict[int, tuple[float, float, float, float]], dict[int, list[TokenRect]], dict[int, int], int]:
     blocks: list[Block] = []
     rects_by_order: dict[int, tuple[float, float, float, float]] = {}
@@ -1404,7 +1705,12 @@ def cluster_words_into_blocks(
         table_like = len(meaningful_clusters) > 1
         if not table_like and len(meaningful_clusters) == 1:
             cluster = meaningful_clusters[0]
-            cluster_text = " ".join(item["text"] for item in cluster).strip()
+            cluster_text = join_words_for_pdf_cluster(
+                cluster,
+                page_width=page_width,
+                page_height=page_height,
+                pixmap=pixmap,
+            )
             x0 = min(item["rect"][0] for item in cluster)
             y0 = min(item["rect"][1] for item in cluster)
             x1 = max(item["rect"][2] for item in cluster)
@@ -1428,13 +1734,29 @@ def cluster_words_into_blocks(
             continue
 
         flush_paragraph()
-        row_key = normalize_row_key(" ".join(item["text"] for item in meaningful_clusters[0])) if table_like else None
+        row_key = (
+            normalize_row_key(
+                join_words_for_pdf_cluster(
+                    meaningful_clusters[0],
+                    page_width=page_width,
+                    page_height=page_height,
+                    pixmap=pixmap,
+                )
+            )
+            if table_like
+            else None
+        )
         row_slot = 0
         numeric_slot = 0
 
         for cluster in meaningful_clusters:
             cluster.sort(key=lambda word: word["rect"][0])
-            block_text = " ".join(item["text"] for item in cluster).strip()
+            block_text = join_words_for_pdf_cluster(
+                cluster,
+                page_width=page_width,
+                page_height=page_height,
+                pixmap=pixmap,
+            )
             x0 = min(item["rect"][0] for item in cluster)
             y0 = min(item["rect"][1] for item in cluster)
             x1 = max(item["rect"][2] for item in cluster)
@@ -1522,6 +1844,7 @@ def extract_pdf_blocks_via_ocr(path: Path) -> BrowserRenderResult:
         max_width = max(max_width, float(page_rect.width))
         max_height = max(max_height, float(page_rect.height))
         text_page = page.get_textpage_ocr(language="eng", dpi=300, full=True)
+        dash_pixmap = page.get_pixmap(matrix=fitz.Matrix(4, 4), colorspace=fitz.csGRAY, alpha=False)
         words_raw = page.get_text("words", textpage=text_page)
         words: list[dict[str, Any]] = []
         for item in words_raw:
@@ -1537,7 +1860,14 @@ def extract_pdf_blocks_via_ocr(path: Path) -> BrowserRenderResult:
             page_token_rects,
             page_numbers,
             order,
-        ) = cluster_words_into_blocks(words, page_number=page_number, page_width=float(page_rect.width), order_start=order)
+        ) = cluster_words_into_blocks(
+            words,
+            page_number=page_number,
+            page_width=float(page_rect.width),
+            page_height=float(page_rect.height),
+            order_start=order,
+            pixmap=dash_pixmap,
+        )
         blocks.extend(page_blocks)
         rects_by_order.update(page_rects)
         token_rects_by_order.update(page_token_rects)
@@ -1830,7 +2160,9 @@ def match_embedded_pdf_blocks(
     candidate_matches_by_html: dict[int, list[tuple[int, float]]] = {}
     for html_index in unmatched_html_indices:
         html_block = html_blocks[html_index]
-        if html_block.kind != "pdf":
+        if html_block.table_cell:
+            continue
+        if html_block.kind != "pdf" and len(html_block.normalized) < 40 and "\n" not in html_block.text:
             continue
         candidates: list[tuple[int, float]] = []
         for doc_index in unmatched_doc_indices:
@@ -2017,6 +2349,44 @@ def compare_blocks(docx_blocks: list[Block], html_blocks: list[Block]) -> tuple[
                         )
                     )
                     continue
+        if doc_block.table_cell and doc_block.row_key:
+            fuzzy_row_candidates = [
+                index
+                for index, candidate in enumerate(html_blocks)
+                if index not in used_html
+                and candidate.table_cell
+                and candidate.row_key
+                and similarity(doc_block.row_key, candidate.row_key) >= 0.94
+                and (
+                    (
+                        doc_block.numeric_slot is not None
+                        and candidate.numeric_slot == doc_block.numeric_slot
+                    )
+                    or (
+                        doc_block.numeric_slot is None
+                        and doc_block.row_slot is not None
+                        and candidate.row_slot == doc_block.row_slot
+                    )
+                )
+            ]
+            if fuzzy_row_candidates:
+                best_fuzzy_row_index = max(
+                    fuzzy_row_candidates,
+                    key=lambda index: table_context_match_score(doc_block, html_blocks[index]),
+                )
+                best_fuzzy_row_score = table_context_match_score(doc_block, html_blocks[best_fuzzy_row_index])
+                if best_fuzzy_row_score >= 0.8:
+                    used_html.add(best_fuzzy_row_index)
+                    matches.append(
+                        Match(
+                            docx_index=doc_index,
+                            html_index=best_fuzzy_row_index,
+                            match_type="approx",
+                            score=best_fuzzy_row_score,
+                            formatting_diffs=summarize_formatting_diff(doc_block, html_blocks[best_fuzzy_row_index]),
+                        )
+                    )
+                    continue
         if table_idx is not None and not pos_candidates:
             exact_table_candidates = table_index_map.get(table_idx, [])
             exact_table_index = next(
@@ -2079,16 +2449,15 @@ def compare_blocks(docx_blocks: list[Block], html_blocks: list[Block]) -> tuple[
             unmatched_doc_indices.append(doc_index)
 
     covered_html = set(used_html)
-    if any(block.kind == "pdf" for block in html_blocks):
-        embedded_matches, embedded_doc_indices, embedded_html_indices = match_embedded_pdf_blocks(
-            docx_blocks,
-            html_blocks,
-            unmatched_doc_indices,
-            [index for index in range(len(html_blocks)) if index not in covered_html],
-        )
-        matches.extend(embedded_matches)
-        unmatched_doc_indices = [index for index in unmatched_doc_indices if index not in embedded_doc_indices]
-        covered_html.update(embedded_html_indices)
+    embedded_matches, embedded_doc_indices, embedded_html_indices = match_embedded_pdf_blocks(
+        docx_blocks,
+        html_blocks,
+        unmatched_doc_indices,
+        [index for index in range(len(html_blocks)) if index not in covered_html],
+    )
+    matches.extend(embedded_matches)
+    unmatched_doc_indices = [index for index in unmatched_doc_indices if index not in embedded_doc_indices]
+    covered_html.update(embedded_html_indices)
 
     unmatched_docx = [docx_blocks[index] for index in unmatched_doc_indices]
     unmatched_html = [block for index, block in enumerate(html_blocks) if index not in covered_html]
@@ -2125,19 +2494,51 @@ def difference_subject(doc_kind: str, html_kind: str) -> str:
     return "token"
 
 
+def date_phrase_for_token(text: str, token: DiffToken) -> str | None:
+    source = normalize_text(text)
+    for match in DATE_PHRASE_RE.finditer(source):
+        if token.start >= match.start() and token.end <= match.end():
+            return match.group(0)
+    return None
+
+
+def contextual_replacement_comment(
+    doc_text: str,
+    target_text: str,
+    doc_token: DiffToken,
+    target_token: DiffToken,
+    *,
+    target_name: str,
+) -> str:
+    doc_date = date_phrase_for_token(doc_text, doc_token)
+    target_date = date_phrase_for_token(target_text, target_token)
+    if doc_date and target_date and normalize_for_compare(doc_date) != normalize_for_compare(target_date):
+        return f"The date is different, {target_date} in {target_name} while {doc_date} in word."
+    return replacement_comment(doc_token, target_token, target_name=target_name)
+
+
+def comment_token_text(token: DiffToken) -> str:
+    if token.kind == "number":
+        return token_with_prefix(token)
+    return token.text
+
+
 def replacement_comment(doc_token: DiffToken, target_token: DiffToken, *, target_name: str) -> str:
     subject = difference_subject(doc_token.kind, target_token.kind)
-    return f"The {subject} is different, {target_token.text} in {target_name} while {doc_token.text} in word."
+    return (
+        f"The {subject} is different, {comment_token_text(target_token)} in {target_name} "
+        f"while {comment_token_text(doc_token)} in word."
+    )
 
 
 def insertion_comment(target_token: DiffToken, *, target_name: str) -> str:
     subject = "number" if target_token.kind == "number" else "word"
-    return f"The {subject} is extra in {target_name}, {target_token.text}. It is not present in word."
+    return f"The {subject} is extra in {target_name}, {comment_token_text(target_token)}. It is not present in word."
 
 
 def deletion_comment(doc_token: DiffToken, *, target_name: str) -> str:
     subject = "number" if doc_token.kind == "number" else "word"
-    return f"The {subject} is missing in {target_name}, {doc_token.text} in word."
+    return f"The {subject} is missing in {target_name}, {comment_token_text(doc_token)} in word."
 
 
 def currency_symbol_comment(
@@ -2236,10 +2637,65 @@ def currency_symbol_comment(
     )
 
 
+def effective_currency_for_comment(
+    block: Block,
+    token: DiffToken,
+    *,
+    peer_blocks: list[Block] | None = None,
+) -> str | None:
+    peers = peer_blocks or [block]
+    explicit = extract_currency_symbol(block.text)
+    if explicit:
+        return explicit
+    if token.prefix_symbol and token.prefix_symbol in "$€£¥":
+        return token.prefix_symbol
+    inferred = inferred_row_currency_symbol(block, peers)
+    if inferred:
+        return inferred
+    table_hint = table_context_currency_hint(block, peers)
+    if table_hint:
+        return table_hint
+    return semantic_currency_hint(block)
+
+
+def numeric_block_difference_comment(
+    doc_block: Block,
+    target_block: Block,
+    *,
+    target_name: str,
+    docx_blocks: list[Block] | None = None,
+    target_blocks: list[Block] | None = None,
+) -> HtmlComment | None:
+    doc_token = single_value_token(doc_block)
+    target_token = single_value_token(target_block)
+    if doc_token is None or target_token is None:
+        return None
+    if doc_token.kind != "number" or target_token.kind != "number":
+        return None
+    if doc_token.normalized == target_token.normalized:
+        return None
+
+    doc_currency = effective_currency_for_comment(doc_block, doc_token, peer_blocks=docx_blocks)
+    target_currency = effective_currency_for_comment(target_block, target_token, peer_blocks=target_blocks)
+    doc_display = token_with_prefix(doc_token)
+    target_display = token_with_prefix(target_token)
+    if doc_currency and not (doc_token.prefix_symbol and doc_token.prefix_symbol in "$€£¥"):
+        doc_display = f"{doc_currency}{doc_token.text}"
+    if target_currency and not (target_token.prefix_symbol and target_token.prefix_symbol in "$€£¥"):
+        target_display = f"{target_currency}{target_token.text}"
+    return HtmlComment(
+        order=target_block.order,
+        contents=f"The number is different, {target_display} in {target_name} while {doc_display} in word.",
+        token_index=0,
+    )
+
+
 def append_word_level_comments(
     comments: list[HtmlComment],
     *,
     order: int,
+    doc_text: str,
+    target_text: str,
     target_tokens: list[DiffToken],
     doc_slice: list[DiffToken],
     target_slice: list[DiffToken],
@@ -2255,7 +2711,13 @@ def append_word_level_comments(
         comments.append(
             HtmlComment(
                 order=order,
-                contents=replacement_comment(doc_token, target_token, target_name=target_name),
+                contents=contextual_replacement_comment(
+                    doc_text,
+                    target_text,
+                    doc_token,
+                    target_token,
+                    target_name=target_name,
+                ),
                 token_index=target_start + offset,
             )
         )
@@ -2326,10 +2788,22 @@ def token_with_prefix(token: DiffToken) -> str:
     return f"{prefix}{spaces}{token.text}" if prefix or spaces else token.text
 
 
+def inter_token_separator(text: str, left: DiffToken, right: DiffToken) -> str:
+    source = normalize_text(text)
+    return source[left.end:right.start]
+
+
+def normalized_separator_symbol(separator: str) -> str:
+    compact = re.sub(r"\s+", "", normalize_text(separator))
+    return compact
+
+
 def contextual_equal_token_comments(
     *,
     order: int,
     target_name: str,
+    doc_text: str,
+    target_text: str,
     doc_tokens: list[DiffToken],
     target_tokens: list[DiffToken],
     target_offset: int = 0,
@@ -2383,6 +2857,33 @@ def contextual_equal_token_comments(
                         token_index=token_index,
                     )
                 )
+        for offset in range(min(i2 - i1, j2 - j1) - 1):
+            doc_left = doc_tokens[i1 + offset]
+            doc_right = doc_tokens[i1 + offset + 1]
+            target_left = target_tokens[j1 + offset]
+            target_right = target_tokens[j1 + offset + 1]
+            doc_sep = normalized_separator_symbol(inter_token_separator(doc_text, doc_left, doc_right))
+            target_sep = normalized_separator_symbol(inter_token_separator(target_text, target_left, target_right))
+            if doc_sep == target_sep:
+                continue
+            if not doc_sep and not target_sep:
+                continue
+            if doc_left.kind == "number" or doc_right.kind == "number":
+                continue
+            doc_desc = doc_sep or "no symbol"
+            target_desc = target_sep or "no symbol"
+            if target_name == "pdf" and target_desc == "no symbol":
+                continue
+            comments.append(
+                HtmlComment(
+                    order=order,
+                    contents=(
+                        f"The symbol is different, {target_name} has {target_desc} "
+                        f"between {target_left.text} and {target_right.text} while word has {doc_desc}."
+                    ),
+                    token_index=target_offset + j1 + offset + 1,
+                )
+            )
     return comments
 
 
@@ -2396,6 +2897,88 @@ def dedupe_html_comments(comments: list[HtmlComment]) -> list[HtmlComment]:
         seen.add(key)
         deduped.append(comment)
     return deduped
+
+
+def single_token_target_comments(
+    doc_block: Block,
+    target_block: Block,
+    *,
+    target_name: str,
+) -> list[HtmlComment] | None:
+    doc_tokens = diff_tokens(doc_block.text)
+    if len(doc_tokens) != 1:
+        return None
+    target_tokens = diff_tokens(target_block.text)
+    if len(target_tokens) <= 1:
+        return None
+
+    doc_token = doc_tokens[0]
+    best_index: int | None = None
+    best_score = 0.0
+    for index, target_token in enumerate(target_tokens):
+        score = 0.0
+        if doc_token.kind == target_token.kind:
+            if doc_token.normalized == target_token.normalized:
+                score = 1.0
+            elif doc_token.kind == "number":
+                score = numeric_value_compatibility(doc_token, target_token)
+            else:
+                score = difflib.SequenceMatcher(None, doc_token.normalized, target_token.normalized).ratio()
+        if score > best_score:
+            best_score = score
+            best_index = index
+
+    if best_index is None or best_score < 0.72:
+        return None
+
+    target_token = target_tokens[best_index]
+    if doc_token.normalized == target_token.normalized:
+        doc_currency = bool(doc_token.prefix_symbol) and doc_token.prefix_symbol in "$€£¥"
+        target_currency = bool(target_token.prefix_symbol) and target_token.prefix_symbol in "$€£¥"
+        if doc_token.prefix_symbol != target_token.prefix_symbol and (doc_currency or target_currency):
+            if target_name == "pdf" and not target_currency:
+                return []
+            return [
+                HtmlComment(
+                    order=target_block.order,
+                    contents=(
+                        f"The currency symbol is different, {target_name} has {token_with_prefix(target_token)} "
+                        f"while word has {token_with_prefix(doc_token)}."
+                    ),
+                    token_index=best_index,
+                )
+            ]
+        if (
+            doc_token.kind == "number"
+            and doc_token.prefix_symbol == target_token.prefix_symbol
+            and doc_token.spaces_before != target_token.spaces_before
+            and max(doc_token.spaces_before, target_token.spaces_before) >= 2
+        ):
+            return [
+                HtmlComment(
+                    order=target_block.order,
+                    contents=(
+                        f"The spacing is different, {target_name} has {token_with_prefix(target_token)} "
+                        f"while word has {token_with_prefix(doc_token)}."
+                    ),
+                    token_index=best_index,
+                )
+            ]
+        return []
+
+    return [
+        HtmlComment(
+            order=target_block.order,
+            contents=contextual_replacement_comment(
+                doc_block.text,
+                target_block.text,
+                doc_token,
+                target_token,
+                target_name=target_name,
+            ),
+            token_index=best_index,
+        )
+    ]
 
 
 def text_difference_comments(
@@ -2423,6 +3006,33 @@ def text_difference_comments(
     )
     if currency_comment is not None:
         return [currency_comment]
+    numeric_comment = numeric_block_difference_comment(
+        doc_block,
+        target_block,
+        target_name=target_name,
+        docx_blocks=docx_blocks,
+        target_blocks=target_blocks,
+    )
+    if numeric_comment is not None:
+        return [numeric_comment]
+    single_token_comments = single_token_target_comments(
+        doc_block,
+        target_block,
+        target_name=target_name,
+    )
+    if single_token_comments is not None:
+        return single_token_comments
+    if target_name == "pdf" and normalize_without_footnote_refs(doc_block.text) == normalize_without_footnote_refs(target_block.text):
+        return []
+    if (
+        target_name == "pdf"
+        and not doc_block.table_cell
+        and not target_block.table_cell
+        and normalize_pdf_paragraph_artifacts(doc_block.text) == normalize_pdf_paragraph_artifacts(target_block.text)
+    ):
+        return []
+    if normalize_for_compare(strip_leading_markers(doc_block.text)) == normalize_for_compare(strip_leading_markers(target_block.text)):
+        return []
     if target_name == "pdf" and not contained_like and not doc_block.table_cell and not target_block.table_cell and score < 0.9:
         return []
 
@@ -2439,6 +3049,8 @@ def text_difference_comments(
     contextual_comments = contextual_equal_token_comments(
         order=target_block.order,
         target_name=target_name,
+        doc_text=doc_block.text,
+        target_text=target_block.text,
         doc_tokens=doc_tokens,
         target_tokens=target_tokens,
         target_offset=target_offset,
@@ -2459,6 +3071,8 @@ def text_difference_comments(
             append_word_level_comments(
                 comments,
                 order=target_block.order,
+                doc_text=doc_block.text,
+                target_text=target_block.text,
                 target_tokens=target_tokens,
                 doc_slice=doc_tokens[i1:i2],
                 target_slice=target_tokens[j1:j2],
@@ -2470,6 +3084,8 @@ def text_difference_comments(
             append_word_level_comments(
                 comments,
                 order=target_block.order,
+                doc_text=doc_block.text,
+                target_text=target_block.text,
                 target_tokens=target_tokens,
                 doc_slice=[],
                 target_slice=target_tokens[j1:j2],
@@ -2481,6 +3097,8 @@ def text_difference_comments(
             append_word_level_comments(
                 comments,
                 order=target_block.order,
+                doc_text=doc_block.text,
+                target_text=target_block.text,
                 target_tokens=target_tokens,
                 doc_slice=doc_tokens[i1:i2],
                 target_slice=[],
@@ -2499,6 +3117,7 @@ def text_difference_comments(
                 if (
                     "spacing is different" in comment.contents
                     or "currency symbol is different" in comment.contents
+                    or comment.contents.startswith("The date ")
                     or comment.contents.startswith("The number ")
                 )
             ]
@@ -2549,6 +3168,9 @@ def text_difference_comments(
                 token_index=pr_index,
             )
         ]
+
+    if target_name == "pdf" and normalize_without_punctuation(doc_block.text) == normalize_without_punctuation(target_block.text):
+        return []
 
     if target_name == "pdf" and contained_like:
         return []
@@ -2644,8 +3266,109 @@ def build_comments(
             )
         )
 
+    def unmatched_html_fallback_comments(block: Block) -> list[HtmlComment]:
+        best_doc_block: Block | None = None
+        best_score = 0.0
+        candidates = unmatched_docx if unmatched_docx else docx_blocks
+        for doc_block in candidates:
+            if doc_block.table_cell != block.table_cell:
+                continue
+            score = similarity(doc_block.normalized, block.normalized)
+            if block.table_cell and doc_block.row_key and block.row_key:
+                score = max(score, table_context_match_score(doc_block, block))
+            if score > best_score:
+                best_doc_block = doc_block
+                best_score = score
+
+        if best_doc_block is None:
+            return []
+
+        overlap = token_overlap_ratio(best_doc_block.normalized, block.normalized)
+        strong_near_match = (
+            best_score >= 0.78
+            or (
+                overlap >= 0.5
+                and best_score >= 0.58
+                and len(diff_tokens(best_doc_block.text)) <= 6
+                and len(diff_tokens(block.text)) <= 6
+            )
+        )
+        if not strong_near_match:
+            return []
+        return text_difference_comments(
+            best_doc_block,
+            block,
+            max(best_score, similarity(best_doc_block.normalized, block.normalized)),
+            target_name=target_name,
+            docx_blocks=docx_blocks,
+            target_blocks=html_blocks,
+            match_type="approx",
+        )
+
+    def unmatched_docx_fallback_comments(block: Block) -> list[HtmlComment]:
+        best_target_block: Block | None = None
+        best_score = 0.0
+        target_candidates = unmatched_html if unmatched_html else html_blocks
+        doc_token = single_value_token(block)
+        doc_token_norm = doc_token.normalized if doc_token is not None else None
+        for target_block in target_candidates:
+            if target_block.table_cell != block.table_cell:
+                continue
+            if (
+                block.table_cell
+                and block.row_key
+                and target_block.row_key
+                and similarity(block.row_key, target_block.row_key) < 0.82
+            ):
+                continue
+            score = similarity(block.normalized, target_block.normalized)
+            if block.table_cell and block.row_key and target_block.row_key:
+                score = max(score, table_context_match_score(block, target_block))
+            if doc_token_norm is not None:
+                target_token_norms = [token.normalized for token in diff_tokens(target_block.text)]
+                if doc_token_norm in target_token_norms:
+                    score = max(score, 0.72 if not block.table_cell else 0.82)
+            if score > best_score:
+                best_target_block = target_block
+                best_score = score
+
+        if best_target_block is None:
+            return []
+
+        overlap = token_overlap_ratio(block.normalized, best_target_block.normalized)
+        strong_near_match = (
+            best_score >= 0.8
+            or (
+                block.table_cell
+                and best_score >= 0.58
+                and len(diff_tokens(block.text)) <= 6
+            )
+            or (
+                overlap >= 0.5
+                and best_score >= 0.6
+                and len(diff_tokens(block.text)) <= 8
+            )
+        )
+        if not strong_near_match:
+            return []
+
+        match_type = "contained" if len(best_target_block.normalized) > max(len(block.normalized) * 1.25, 24) else "approx"
+        return text_difference_comments(
+            block,
+            best_target_block,
+            max(best_score, similarity(block.normalized, best_target_block.normalized)),
+            target_name=target_name,
+            docx_blocks=docx_blocks,
+            target_blocks=html_blocks,
+            match_type=match_type,
+        )
+
     for block in unmatched_html:
         if target_label == "PDF":
+            continue
+        fallback_comments = unmatched_html_fallback_comments(block)
+        if fallback_comments:
+            html_comments.extend(fallback_comments)
             continue
         html_comments.append(
             HtmlComment(
@@ -2660,6 +3383,8 @@ def build_comments(
         for block in appendix_summary_blocks(docx_blocks, unmatched_docx)
     ]
     if target_label == "PDF":
+        for block in unmatched_docx:
+            html_comments.extend(unmatched_docx_fallback_comments(block))
         appendix_comments = []
     return html_comments, appendix_comments
 
@@ -2673,6 +3398,7 @@ def group_html_comments(html_comments: list[HtmlComment]) -> dict[int, list[str]
 
 def pdf_page_summary_comments(
     *,
+    docx_blocks: list[Block],
     pdf_blocks: list[Block],
     unmatched_pdf: list[Block],
     matches: list[Match],
@@ -2700,14 +3426,18 @@ def pdf_page_summary_comments(
         meaningful_blocks = [block for block in blocks if visible_meaningful(block.text) and not is_pdf_chrome_text(block.text)]
         if len(meaningful_blocks) < 3:
             continue
+        top_blocks = meaningful_blocks[:3]
+        if any(pdf_block_has_docx_anchor(block, docx_blocks) for block in top_blocks):
+            continue
         matched_count = matched_pages.get(page_number, 0)
         if matched_count > 0 and not (matched_count <= 1 and len(meaningful_blocks) >= 6):
             continue
+        anchor_block = meaningful_blocks[0]
         comments.append(
             HtmlComment(
-                order=order_by_page[page_number],
+                order=anchor_block.order,
                 contents="This PDF page contains content with no corresponding content in the Word document.",
-                token_index=0 if diff_tokens(meaningful_blocks[0].text) else None,
+                token_index=0 if diff_tokens(anchor_block.text) else None,
             )
         )
     return comments
@@ -3214,6 +3944,7 @@ def run_compare_pdf(
     )
     pdf_comments.extend(
         pdf_page_summary_comments(
+            docx_blocks=docx_blocks,
             pdf_blocks=pdf_blocks,
             unmatched_pdf=unmatched_pdf,
             matches=matches,
