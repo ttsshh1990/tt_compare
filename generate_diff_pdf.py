@@ -666,6 +666,10 @@ def inferred_row_currency_symbol(block: Block, blocks: list[Block]) -> str | Non
         symbol = extract_currency_symbol(peer.text)
         if symbol:
             return symbol
+    for peer in row_peer_blocks(block, blocks):
+        peer_text = normalize_text(peer.text).strip()
+        if peer_text in {"$", "€", "£", "¥"}:
+            return peer_text
     return None
 
 
@@ -760,6 +764,20 @@ def pdf_block_has_docx_anchor(block: Block, docx_blocks: list[Block]) -> bool:
         overlap = max(token_overlap_ratio(block_norm, doc_norm), token_overlap_ratio(doc_norm, block_norm))
         if overlap >= 0.82:
             return True
+    return False
+
+
+def pdf_blocks_equal_after_cleanup(doc_block: Block, target_block: Block) -> bool:
+    if normalize_without_footnote_refs(doc_block.text) == normalize_without_footnote_refs(target_block.text):
+        return True
+    if (
+        not doc_block.table_cell
+        and not target_block.table_cell
+        and normalize_pdf_paragraph_artifacts(doc_block.text) == normalize_pdf_paragraph_artifacts(target_block.text)
+    ):
+        return True
+    if normalize_for_compare(strip_leading_markers(doc_block.text)) == normalize_for_compare(strip_leading_markers(target_block.text)):
+        return True
     return False
 
 
@@ -2677,6 +2695,12 @@ def numeric_block_difference_comment(
 
     doc_currency = effective_currency_for_comment(doc_block, doc_token, peer_blocks=docx_blocks)
     target_currency = effective_currency_for_comment(target_block, target_token, peer_blocks=target_blocks)
+    if target_name == "pdf" and doc_currency and not target_currency:
+        parsed_target = parse_numeric_token(target_token.text)
+        if parsed_target is not None:
+            target_value, target_is_percent = parsed_target
+            if not target_is_percent and (abs(target_value) >= 100 or "," in target_token.text):
+                target_currency = doc_currency
     doc_display = token_with_prefix(doc_token)
     target_display = token_with_prefix(target_token)
     if doc_currency and not (doc_token.prefix_symbol and doc_token.prefix_symbol in "$€£¥"):
@@ -3022,14 +3046,7 @@ def text_difference_comments(
     )
     if single_token_comments is not None:
         return single_token_comments
-    if target_name == "pdf" and normalize_without_footnote_refs(doc_block.text) == normalize_without_footnote_refs(target_block.text):
-        return []
-    if (
-        target_name == "pdf"
-        and not doc_block.table_cell
-        and not target_block.table_cell
-        and normalize_pdf_paragraph_artifacts(doc_block.text) == normalize_pdf_paragraph_artifacts(target_block.text)
-    ):
+    if target_name == "pdf" and pdf_blocks_equal_after_cleanup(doc_block, target_block):
         return []
     if normalize_for_compare(strip_leading_markers(doc_block.text)) == normalize_for_compare(strip_leading_markers(target_block.text)):
         return []
@@ -3424,13 +3441,12 @@ def pdf_page_summary_comments(
     comments: list[HtmlComment] = []
     for page_number, blocks in sorted(unmatched_by_page.items()):
         meaningful_blocks = [block for block in blocks if visible_meaningful(block.text) and not is_pdf_chrome_text(block.text)]
-        if len(meaningful_blocks) < 3:
-            continue
-        top_blocks = meaningful_blocks[:3]
-        if any(pdf_block_has_docx_anchor(block, docx_blocks) for block in top_blocks):
-            continue
         matched_count = matched_pages.get(page_number, 0)
-        if matched_count > 0 and not (matched_count <= 1 and len(meaningful_blocks) >= 6):
+        if not should_emit_pdf_page_summary_comment(
+            meaningful_blocks=meaningful_blocks,
+            matched_count=matched_count,
+            docx_blocks=docx_blocks,
+        ):
             continue
         anchor_block = meaningful_blocks[0]
         comments.append(
@@ -3441,6 +3457,22 @@ def pdf_page_summary_comments(
             )
         )
     return comments
+
+
+def should_emit_pdf_page_summary_comment(
+    *,
+    meaningful_blocks: list[Block],
+    matched_count: int,
+    docx_blocks: list[Block],
+) -> bool:
+    if len(meaningful_blocks) < 3:
+        return False
+    top_blocks = meaningful_blocks[:3]
+    if any(pdf_block_has_docx_anchor(block, docx_blocks) for block in top_blocks):
+        return False
+    if matched_count > 0 and not (matched_count <= 1 and len(meaningful_blocks) >= 6):
+        return False
+    return True
 
 
 def pdf_safe_text(text: str) -> str:

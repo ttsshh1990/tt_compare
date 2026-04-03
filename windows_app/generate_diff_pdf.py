@@ -666,6 +666,10 @@ def inferred_row_currency_symbol(block: Block, blocks: list[Block]) -> str | Non
         symbol = extract_currency_symbol(peer.text)
         if symbol:
             return symbol
+    for peer in row_peer_blocks(block, blocks):
+        peer_text = normalize_text(peer.text).strip()
+        if peer_text in {"$", "€", "£", "¥"}:
+            return peer_text
     return None
 
 
@@ -2677,6 +2681,12 @@ def numeric_block_difference_comment(
 
     doc_currency = effective_currency_for_comment(doc_block, doc_token, peer_blocks=docx_blocks)
     target_currency = effective_currency_for_comment(target_block, target_token, peer_blocks=target_blocks)
+    if target_name == "pdf" and doc_currency and not target_currency:
+        parsed_target = parse_numeric_token(target_token.text)
+        if parsed_target is not None:
+            target_value, target_is_percent = parsed_target
+            if not target_is_percent and (abs(target_value) >= 100 or "," in target_token.text):
+                target_currency = doc_currency
     doc_display = token_with_prefix(doc_token)
     target_display = token_with_prefix(target_token)
     if doc_currency and not (doc_token.prefix_symbol and doc_token.prefix_symbol in "$€£¥"):
