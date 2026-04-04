@@ -257,6 +257,41 @@
       flex-wrap: wrap;
     }
 
+    .profile-box {
+      display: none;
+      margin-bottom: 16px;
+      padding: 14px 16px;
+      border-radius: 18px;
+      background: rgba(23, 23, 23, 0.05);
+      border: 1px solid rgba(23, 23, 23, 0.08);
+    }
+
+    .profile-box.active {
+      display: block;
+    }
+
+    .profile-toggle {
+      display: flex;
+      gap: 12px;
+      align-items: start;
+    }
+
+    .profile-toggle input {
+      margin-top: 3px;
+    }
+
+    .profile-copy strong {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 14px;
+    }
+
+    .profile-copy span {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
     button, .button-link {
       appearance: none;
       border: none;
@@ -490,6 +525,16 @@
           </label>
         </div>
 
+        <div class="profile-box" id="proofreadBox">
+          <label class="profile-toggle">
+            <input type="checkbox" id="proofreadToggle" checked />
+            <span class="profile-copy">
+              <strong>Proofread Mode</strong>
+              <span id="proofreadCopy">Use stricter token, symbol, spacing, and near-match fallback rules for DOCX versus PDF review. This is the recommended PDF profile, but full visual formatting equivalence is still not guaranteed.</span>
+            </span>
+          </label>
+        </div>
+
         <div class="actions">
           <button id="compareBtn" class="primary" disabled>Generate Annotated PDF</button>
           <button id="resetBtn" class="secondary" type="button">Reset</button>
@@ -549,12 +594,16 @@
       docxFile: null,
       targetFile: null,
       mode: 'html',
+      proofread: true,
       running: false,
     };
 
     const els = {
       docxInput: document.getElementById('docxInput'),
       targetInput: document.getElementById('targetInput'),
+      proofreadBox: document.getElementById('proofreadBox'),
+      proofreadToggle: document.getElementById('proofreadToggle'),
+      proofreadCopy: document.getElementById('proofreadCopy'),
       docxZone: document.getElementById('docxZone'),
       targetZone: document.getElementById('targetZone'),
       docxChip: document.getElementById('docxChip'),
@@ -595,6 +644,7 @@
         onlyLabel: 'HTML / DOCX Only',
         panelSub: 'Use one Word `.docx` file and one saved webpage `.html` or `.htm` file. The compare job runs locally on this machine.',
         heroBody: 'This interface runs the local comparison pipeline, renders the webpage through Chromium, and annotates only the meaningful content differences against the Word source.',
+        proofreadCopy: 'Use stricter token, symbol, spacing, and formatting checks for DOCX versus HTML proofreading. This is the recommended mode when you want closer proofread-style comments against the webpage output.',
         ready: 'Ready to generate the annotated PDF.',
         waiting: 'Waiting for both files.',
         working: 'Generating annotated PDF from the saved webpage. This can take a few seconds on larger documents...',
@@ -607,6 +657,7 @@
         onlyLabel: 'PDF / DOCX Only',
         panelSub: 'Use one Word `.docx` file and one PDF file. The compare job runs locally on this machine and annotates the PDF itself.',
         heroBody: 'This interface runs the local comparison pipeline, extracts positioned text from the PDF, and annotates the copied PDF with meaningful content differences against the Word source.',
+        proofreadCopy: 'Use stricter token, symbol, spacing, and near-match fallback rules for DOCX versus PDF review. This is the recommended PDF profile, but full visual formatting equivalence is still not guaranteed.',
         ready: 'Ready to generate the annotated PDF.',
         waiting: 'Waiting for both files.',
         working: 'Generating annotated PDF from the source PDF. This can take a few seconds on larger documents...',
@@ -721,16 +772,18 @@
     function renderResults(payload) {
       const summary = payload.summary;
       const targetKind = (summary.target_kind || state.mode || 'html').toUpperCase();
+      const compareProfile = summary.compare_profile || (state.proofread ? 'proofread' : 'standard');
       els.resultsEmpty.style.display = 'none';
       els.resultsBody.classList.add('active');
-      els.summaryLead.textContent = `Renderer: ${summary.renderer}. PDF created successfully.`;
+      els.summaryLead.textContent = `Renderer: ${summary.renderer}. Profile: ${compareProfile}. PDF created successfully.`;
       els.metricExact.textContent = String(summary.exact_matches);
       els.metricApprox.textContent = String(summary.approx_matches);
       els.metricOnly.textContent = `${summary.html_only} / ${summary.docx_only}`;
       els.metricOnlyLabel.textContent = `${targetKind} / DOCX Only`;
       els.metaStrip.textContent =
         `${summary.docx_blocks} DOCX blocks, ${summary.html_blocks} ${targetKind} blocks. ` +
-        `${summary.docx_only} DOCX-only blocks and ${summary.html_only} ${targetKind}-only blocks stayed unmatched.`;
+        `${summary.docx_only} DOCX-only blocks and ${summary.html_only} ${targetKind}-only blocks stayed unmatched.` +
+        (summary.formatting_scope ? ` ${summary.formatting_scope}.` : '');
       els.downloadPdf.href = payload.pdf_url;
       els.downloadPdf.setAttribute('download', payload.output_name);
       els.downloadSummary.href = payload.summary_url;
@@ -750,6 +803,8 @@
       els.panelSub.textContent = copy.panelSub;
       els.heroBody.textContent = copy.heroBody;
       els.targetInput.setAttribute('accept', copy.accept);
+      els.proofreadCopy.textContent = copy.proofreadCopy;
+      els.proofreadBox.classList.add('active');
       state.targetFile = null;
       els.targetInput.value = '';
       updateFileCard('target', null);
@@ -775,6 +830,7 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             mode: state.mode,
+            proofread: els.proofreadToggle.checked,
             docx_name: state.docxFile.name,
             target_name: state.targetFile.name,
             docx_b64: docxB64,
@@ -817,6 +873,9 @@
     wireDropzone(els.targetZone, els.targetInput, 'target');
     els.modeHtml.addEventListener('click', () => applyMode('html'));
     els.modePdf.addEventListener('click', () => applyMode('pdf'));
+    els.proofreadToggle.addEventListener('change', () => {
+      state.proofread = els.proofreadToggle.checked;
+    });
     els.compareBtn.addEventListener('click', runCompare);
     els.resetBtn.addEventListener('click', resetAll);
     applyMode('html');

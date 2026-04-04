@@ -14,7 +14,7 @@ import tempfile
 import textwrap
 import zipfile
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -99,6 +99,9 @@ class Block:
     order: int
     text: str
     normalized: str
+    raw_text: str = ""
+    proof_text: str = ""
+    match_text: str = ""
     heading: bool = False
     heading_level: int | None = None
     bold: bool = False
@@ -111,7 +114,54 @@ class Block:
     row_key: str | None = None
     row_slot: int | None = None
     numeric_slot: int | None = None
+    footnote_marker: str | None = None
+    structure_role: str = ""
+    family_table_index: int | None = None
+    runs: list["InlineRun"] = field(default_factory=list)
 
+
+@dataclass
+class InlineRun:
+    text: str
+    kind: str
+    bold: bool = False
+    italic: bool = False
+    underline: bool = False
+    hyperlink: bool = False
+    source_index: int = 0
+
+
+@dataclass
+class WordStyle:
+    style_id: str
+    style_type: str
+    based_on: str | None = None
+    name: str = ""
+    props: dict[str, bool | None] = field(default_factory=dict)
+
+
+@dataclass
+class WordStyleResolver:
+    default_run_props: dict[str, bool | None] = field(default_factory=dict)
+    styles: dict[str, WordStyle] = field(default_factory=dict)
+    hyperlink_style_id: str | None = None
+    _cache: dict[str, dict[str, bool | None]] = field(default_factory=dict)
+
+    def resolve_style_props(self, style_id: str | None) -> dict[str, bool | None]:
+        if not style_id:
+            return {}
+        cached = self._cache.get(style_id)
+        if cached is not None:
+            return dict(cached)
+        style = self.styles.get(style_id)
+        if style is None:
+            return {}
+        props: dict[str, bool | None] = {}
+        if style.based_on and style.based_on != style_id:
+            props = self.resolve_style_props(style.based_on)
+        props = merge_word_format_props(props, style.props)
+        self._cache[style_id] = dict(props)
+        return dict(props)
 
 @dataclass
 class Match:
@@ -120,6 +170,45 @@ class Match:
     match_type: str
     score: float
     formatting_diffs: list[str]
+
+
+@dataclass
+class TableFamily:
+    source: str
+    table_index: int
+    block_indices: list[int]
+    order_start: int
+    row_keys: list[str]
+    header_texts: list[str]
+    title_context: list[str]
+    row_count: int
+    numeric_count: int
+    comparable: bool
+
+
+@dataclass
+class BlockGroup:
+    group_id: str
+    source: str
+    group_type: str
+    block_indices: list[int]
+    key: str
+    text: str
+    order_start: int
+    order_end: int
+    footnote_marker: str | None = None
+
+
+@dataclass
+class SectionFamily:
+    family_id: str
+    source: str
+    family_type: str
+    block_indices: list[int]
+    key: str
+    text: str
+    order_start: int
+    order_end: int
 
 
 @dataclass
@@ -167,6 +256,8 @@ def table_pos_key(block: Block) -> tuple[int, int, int] | None:
 
 
 def table_index_key(block: Block) -> int | None:
+    if block.family_table_index is not None:
+        return block.family_table_index
     return block.table_pos[0] if block.table_cell and block.table_pos is not None else None
 
 
@@ -190,6 +281,42 @@ def global_numeric_context_key(block: Block) -> tuple[str, int] | None:
     return (block.row_key, block.numeric_slot)
 
 
+def mapped_table_index_key(
+    block: Block,
+    doc_to_target_table_map: dict[int, int] | None = None,
+) -> int | None:
+    table_idx = table_index_key(block)
+    if table_idx is None:
+        return None
+    if doc_to_target_table_map is None:
+        return table_idx
+    return doc_to_target_table_map.get(table_idx, table_idx)
+
+
+def mapped_table_pos_key(
+    block: Block,
+    doc_to_target_table_map: dict[int, int] | None = None,
+) -> tuple[int, int, int] | None:
+    pos = table_pos_key(block)
+    if pos is None:
+        return None
+    table_idx, row_idx, col_idx = pos
+    mapped_table_idx = table_idx if doc_to_target_table_map is None else doc_to_target_table_map.get(table_idx, table_idx)
+    return (mapped_table_idx, row_idx, col_idx)
+
+
+def mapped_row_context_key(
+    block: Block,
+    doc_to_target_table_map: dict[int, int] | None = None,
+) -> tuple[int, str, int] | None:
+    row_key = row_context_key(block)
+    if row_key is None:
+        return None
+    table_idx, normalized_row_key, row_slot = row_key
+    mapped_table_idx = table_idx if doc_to_target_table_map is None else doc_to_target_table_map.get(table_idx, table_idx)
+    return (mapped_table_idx, normalized_row_key, row_slot)
+
+
 def single_value_token(block: Block) -> DiffToken | None:
     tokens = diff_tokens(block.text)
     return tokens[0] if len(tokens) == 1 else None
@@ -200,12 +327,13 @@ def parse_numeric_token(token_text: str) -> tuple[float, bool] | None:
     if not text:
         return None
     is_percent = "%" in text
+    text = text.replace("%", "")
     negative = False
     if text.startswith("(") and text.endswith(")"):
         negative = True
         text = text[1:-1]
     text = text.replace("$", "").replace("€", "").replace("£", "").replace("¥", "")
-    text = text.replace("%", "").replace(",", "").replace("~", "").replace(" ", "")
+    text = text.replace(",", "").replace("~", "").replace(" ", "")
     if text.startswith("-"):
         negative = True
         text = text[1:]
@@ -246,6 +374,953 @@ def numeric_value_compatibility(doc_token: DiffToken, target_token: DiffToken) -
     return max(0.0, 1.0 - min(1.0, relative_gap * 0.5))
 
 
+def unique_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
+
+
+def table_family_title_context(blocks: list[Block], first_index: int) -> list[str]:
+    context: list[str] = []
+    for index in range(first_index - 1, -1, -1):
+        block = blocks[index]
+        if block.table_cell:
+            break
+        text = normalize_without_punctuation(block.text)
+        if not visible_meaningful(text):
+            continue
+        context.append(text)
+        if len(context) >= 3:
+            break
+    context.reverse()
+    return context
+
+
+def header_family_group(role: str) -> str | None:
+    if role in {"table_title", "table_subtitle"}:
+        return "title_family"
+    if role == "table_column_header":
+        return "column_header_family"
+    return None
+
+
+def build_family_role_ordinals(blocks: list[Block]) -> tuple[dict[int, int], dict[tuple[int, str, int], list[int]]]:
+    index_to_ordinal: dict[int, int] = {}
+    ordinal_map: dict[tuple[int, str, int], list[int]] = {}
+    grouped: dict[tuple[int, str], list[int]] = {}
+    for index, block in enumerate(blocks):
+        family_idx = table_index_key(block)
+        group = header_family_group(block.structure_role)
+        if family_idx is None or group is None:
+            continue
+        grouped.setdefault((family_idx, group), []).append(index)
+    for (family_idx, group), indices in grouped.items():
+        for ordinal, index in enumerate(sorted(indices, key=lambda idx: blocks[idx].order)):
+            index_to_ordinal[index] = ordinal
+            ordinal_map.setdefault((family_idx, group, ordinal), []).append(index)
+    return index_to_ordinal, ordinal_map
+
+
+def build_row_label_ordinals(blocks: list[Block]) -> tuple[dict[int, int], dict[tuple[int, int], list[int]]]:
+    index_to_ordinal: dict[int, int] = {}
+    ordinal_map: dict[tuple[int, int], list[int]] = {}
+    grouped: dict[int, list[int]] = {}
+    for index, block in enumerate(blocks):
+        family_idx = table_index_key(block)
+        if family_idx is None or block.structure_role != "table_row_label":
+            continue
+        grouped.setdefault(family_idx, []).append(index)
+    for family_idx, indices in grouped.items():
+        def row_sort_key(idx: int) -> tuple[int, int]:
+            block = blocks[idx]
+            row_idx = block.table_pos[1] if block.table_pos is not None else 10**9
+            order = block.order
+            return (row_idx, order)
+        for ordinal, index in enumerate(sorted(indices, key=row_sort_key)):
+            index_to_ordinal[index] = ordinal
+            ordinal_map.setdefault((family_idx, ordinal), []).append(index)
+    return index_to_ordinal, ordinal_map
+
+
+def extract_table_families(blocks: list[Block]) -> dict[int, TableFamily]:
+    grouped_indices: dict[int, list[int]] = {}
+    for index, block in enumerate(blocks):
+        table_idx = table_index_key(block)
+        if table_idx is None:
+            continue
+        grouped_indices.setdefault(table_idx, []).append(index)
+
+    families: dict[int, TableFamily] = {}
+    for table_idx, block_indices in grouped_indices.items():
+        table_blocks = [blocks[index] for index in block_indices]
+        row_keys = unique_preserve_order(
+            [block.row_key for block in table_blocks if block.row_key]
+        )
+        header_texts = unique_preserve_order(
+            [
+                normalize_without_punctuation(strip_leading_markers(block.text))
+                for block in table_blocks
+                if visible_meaningful(block.text)
+                and (single_value_token(block) is None or single_value_token(block).kind != "number")
+            ]
+        )[:8]
+        numeric_count = sum(1 for block in table_blocks if block.numeric_slot is not None)
+        row_count = len(row_keys)
+        comparable = row_count >= 2 and (numeric_count >= 2 or len(header_texts) >= 3)
+        families[table_idx] = TableFamily(
+            source=table_blocks[0].source,
+            table_index=table_idx,
+            block_indices=list(block_indices),
+            order_start=min(blocks[index].order for index in block_indices),
+            row_keys=row_keys,
+            header_texts=header_texts,
+            title_context=table_family_title_context(blocks, min(block_indices)),
+            row_count=row_count,
+            numeric_count=numeric_count,
+            comparable=comparable,
+        )
+    return families
+
+
+def section_family_text(blocks: list[Block], indices: list[int]) -> str:
+    return "\n".join(blocks[index].text for index in indices if visible_meaningful(blocks[index].text))
+
+
+def section_family_key(text: str) -> str:
+    return " ".join(tokenize(normalize_for_compare(text))[:18])
+
+
+def extract_section_families(blocks: list[Block]) -> tuple[list[SectionFamily], dict[int, str]]:
+    families: list[SectionFamily] = []
+    block_to_family: dict[int, str] = {}
+    used_indices: set[int] = set()
+
+    table_families = extract_table_families(blocks)
+    for table_idx, family in sorted(table_families.items()):
+        title_bits = " ".join(family.title_context + family.header_texts[:4])
+        normalized_title_bits = normalize_for_compare(title_bits)
+        if "reconciliation" not in normalized_title_bits:
+            continue
+        indices = list(family.block_indices)
+        for index, block in enumerate(blocks):
+            if block.family_table_index == table_idx and not block.table_cell and block.structure_role in {"table_title", "table_subtitle"}:
+                indices.append(index)
+        indices = sorted(set(indices), key=lambda idx: blocks[idx].order)
+        if not indices:
+            continue
+        text = section_family_text(blocks, indices)
+        section = SectionFamily(
+            family_id=f"{blocks[indices[0]].source}-section-reconciliation-{table_idx}",
+            source=blocks[indices[0]].source,
+            family_type="reconciliation",
+            block_indices=indices,
+            key=section_family_key(text),
+            text=text,
+            order_start=blocks[indices[0]].order,
+            order_end=blocks[indices[-1]].order,
+        )
+        families.append(section)
+        for index in indices:
+            block_to_family[index] = section.family_id
+            used_indices.add(index)
+
+    index = 0
+    while index < len(blocks):
+        if index in used_indices:
+            index += 1
+            continue
+        block = blocks[index]
+        if block.table_cell or block.kind == "footnote":
+            index += 1
+            continue
+        start_header = (
+            block.structure_role in {"section_header", "section_lead"}
+            or normalize_for_compare(block.text) == "forward looking statements"
+        )
+        if not start_header:
+            index += 1
+            continue
+        family_indices = [index]
+        probe = index + 1
+        while probe < len(blocks):
+            candidate = blocks[probe]
+            if candidate.table_cell or candidate.kind == "footnote":
+                break
+            if candidate.structure_role in {"section_header", "section_lead"} and visible_meaningful(candidate.text):
+                break
+            family_indices.append(probe)
+            probe += 1
+        text = section_family_text(blocks, family_indices)
+        if len(diff_tokens(text)) < 20:
+            index += 1
+            continue
+        section = SectionFamily(
+            family_id=f"{block.source}-section-narrative-{index}",
+            source=block.source,
+            family_type="narrative",
+            block_indices=family_indices,
+            key=section_family_key(text),
+            text=text,
+            order_start=blocks[family_indices[0]].order,
+            order_end=blocks[family_indices[-1]].order,
+        )
+        families.append(section)
+        for family_index in family_indices:
+            block_to_family[family_index] = section.family_id
+            used_indices.add(family_index)
+        index = probe
+    return families, block_to_family
+
+
+def section_family_similarity(doc_family: SectionFamily, target_family: SectionFamily) -> float:
+    if doc_family.family_type != target_family.family_type:
+        return 0.0
+    key_score = similarity(doc_family.key, target_family.key)
+    overlap = token_overlap_ratio(
+        normalize_for_compare(doc_family.text),
+        normalize_for_compare(target_family.text),
+    )
+    if doc_family.family_type == "reconciliation":
+        return max(key_score, overlap)
+    return max(key_score * 0.7 + overlap * 0.3, overlap)
+
+
+def match_section_families(
+    docx_blocks: list[Block],
+    target_blocks: list[Block],
+) -> tuple[dict[str, str], dict[int, str], dict[int, str], dict[str, SectionFamily], dict[str, SectionFamily]]:
+    doc_families, doc_block_to_family = extract_section_families(docx_blocks)
+    target_families, target_block_to_family = extract_section_families(target_blocks)
+    doc_family_map = {family.family_id: family for family in doc_families}
+    target_family_map = {family.family_id: family for family in target_families}
+    matches: dict[str, str] = {}
+    used_target_ids: set[str] = set()
+    for doc_family in doc_families:
+        best_target: SectionFamily | None = None
+        best_score = 0.0
+        for target_family in target_families:
+            if target_family.family_id in used_target_ids:
+                continue
+            score = section_family_similarity(doc_family, target_family)
+            threshold = 0.48 if doc_family.family_type == "reconciliation" else 0.6
+            if score < threshold:
+                continue
+            if score > best_score:
+                best_score = score
+                best_target = target_family
+        if best_target is not None:
+            matches[doc_family.family_id] = best_target.family_id
+            used_target_ids.add(best_target.family_id)
+    return matches, doc_block_to_family, target_block_to_family, doc_family_map, target_family_map
+
+
+def overlap_ratio(values_a: list[str], values_b: list[str]) -> float:
+    if not values_a or not values_b:
+        return 0.0
+    set_a = set(values_a)
+    set_b = set(values_b)
+    intersection = len(set_a & set_b)
+    return intersection / max(len(set_a), len(set_b), 1)
+
+
+def title_context_similarity(doc_family: TableFamily, target_family: TableFamily) -> float:
+    if not doc_family.title_context or not target_family.title_context:
+        return 0.0
+    best = 0.0
+    for doc_title in doc_family.title_context:
+        for target_title in target_family.title_context:
+            best = max(best, similarity(doc_title, target_title))
+    return best
+
+
+def table_family_alignment_score(
+    doc_family: TableFamily,
+    target_family: TableFamily,
+    *,
+    doc_rank: int,
+    target_rank: int,
+) -> float:
+    row_overlap = overlap_ratio(doc_family.row_keys, target_family.row_keys)
+    header_overlap = overlap_ratio(doc_family.header_texts, target_family.header_texts)
+    title_overlap = title_context_similarity(doc_family, target_family)
+    row_count_ratio = min(doc_family.row_count, target_family.row_count) / max(doc_family.row_count, target_family.row_count, 1)
+    numeric_ratio = min(doc_family.numeric_count, target_family.numeric_count) / max(doc_family.numeric_count, target_family.numeric_count, 1)
+    order_proximity = max(0.0, 1.0 - min(1.0, abs(doc_rank - target_rank) * 0.5))
+    return (
+        row_overlap * 6.0
+        + header_overlap * 2.5
+        + title_overlap * 2.0
+        + row_count_ratio * 0.75
+        + numeric_ratio * 0.75
+        + order_proximity * 0.5
+    )
+
+
+def align_table_families(
+    docx_blocks: list[Block],
+    target_blocks: list[Block],
+) -> tuple[dict[int, int], dict[int, int]]:
+    if not target_blocks or target_blocks[0].source != "html":
+        return {}, {}
+
+    doc_families = extract_table_families(docx_blocks)
+    target_families = extract_table_families(target_blocks)
+    comparable_doc = [family for family in sorted(doc_families.values(), key=lambda family: family.table_index) if family.comparable]
+    comparable_target = [family for family in sorted(target_families.values(), key=lambda family: family.table_index) if family.comparable]
+    if not comparable_doc or not comparable_target:
+        return {}, {}
+
+    doc_rank = {family.table_index: rank for rank, family in enumerate(comparable_doc)}
+    target_rank = {family.table_index: rank for rank, family in enumerate(comparable_target)}
+
+    candidate_pairs: list[tuple[float, int, int]] = []
+    for doc_family in comparable_doc:
+        for target_family in comparable_target:
+            score = table_family_alignment_score(
+                doc_family,
+                target_family,
+                doc_rank=doc_rank[doc_family.table_index],
+                target_rank=target_rank[target_family.table_index],
+            )
+            if score >= 2.4:
+                candidate_pairs.append((score, doc_family.table_index, target_family.table_index))
+
+    doc_to_target: dict[int, int] = {}
+    target_to_doc: dict[int, int] = {}
+    for _score, doc_table_idx, target_table_idx in sorted(
+        candidate_pairs,
+        key=lambda item: (
+            item[0],
+            -abs(doc_rank[item[1]] - target_rank[item[2]]),
+            -item[1],
+            -item[2],
+        ),
+        reverse=True,
+    ):
+        if doc_table_idx in doc_to_target or target_table_idx in target_to_doc:
+            continue
+        doc_to_target[doc_table_idx] = target_table_idx
+        target_to_doc[target_table_idx] = doc_table_idx
+    return doc_to_target, target_to_doc
+
+
+CONTACT_LABELS = {
+    "investor contact": "investor_contact",
+    "editorial contact": "editorial_contact",
+}
+CONTACT_PHONE_RE = re.compile(r"\b\d{3}-\d{3}-\d{4}\b")
+CONTACT_EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b")
+CONTACT_COMPANY_RE = re.compile(r"\bSynopsys,\s*Inc\.?\b", flags=re.I)
+
+
+def contact_label_key(text: str) -> str | None:
+    normalized = normalize_for_compare(text)
+    for label, key in CONTACT_LABELS.items():
+        if normalized == label or normalized.startswith(f"{label}:") or normalized.startswith(f"{label} "):
+            return key
+    return None
+
+
+def looks_like_contact_fragment(block: Block) -> bool:
+    if block.table_cell or block.heading:
+        return False
+    text = normalize_text(block.text).strip()
+    normalized = normalize_for_compare(text)
+    if not text:
+        return False
+    if contact_label_key(text):
+        return True
+    if CONTACT_EMAIL_RE.search(text):
+        return True
+    if CONTACT_PHONE_RE.search(text):
+        return True
+    if normalized == "synopsys, inc.":
+        return True
+    if len(text.split()) <= 4 and text[:1].isupper():
+        return True
+    return False
+
+
+def contact_field_role(text: str) -> str | None:
+    clean_text = normalize_text(text).strip()
+    normalized = normalize_for_compare(clean_text)
+    if not clean_text:
+        return None
+    if contact_label_key(clean_text):
+        return "contact_label"
+    if CONTACT_COMPANY_RE.search(clean_text):
+        return "contact_company"
+    if CONTACT_EMAIL_RE.search(clean_text):
+        return "contact_email"
+    if CONTACT_PHONE_RE.search(clean_text):
+        return "contact_phone"
+    if len(clean_text.split()) <= 4 and clean_text[:1].isupper() and not clean_text.isupper():
+        return "contact_name"
+    return None
+
+
+def extract_contact_fields(text: str) -> dict[str, str]:
+    clean_text = normalize_text(text).strip()
+    fields: dict[str, str] = {}
+    label_match = re.match(r"^\s*((?:INVESTOR|EDITORIAL)\s+CONTACT:?)\s*", clean_text, flags=re.I)
+    remainder = clean_text
+    if label_match:
+        fields["contact_label"] = label_match.group(1).strip()
+        remainder = clean_text[label_match.end():].strip()
+
+    company_match = CONTACT_COMPANY_RE.search(remainder)
+    phone_match = CONTACT_PHONE_RE.search(remainder)
+    email_match = CONTACT_EMAIL_RE.search(remainder)
+    if company_match:
+        fields["contact_company"] = company_match.group(0).strip()
+    if phone_match:
+        fields["contact_phone"] = phone_match.group(0).strip()
+    if email_match:
+        fields["contact_email"] = email_match.group(0).strip()
+
+    name_end = len(remainder)
+    for match in (company_match, phone_match, email_match):
+        if match is not None:
+            name_end = min(name_end, match.start())
+    contact_name = remainder[:name_end].strip(" ,;")
+    if contact_name:
+        fields["contact_name"] = contact_name
+    return fields
+
+
+def contact_field_payload(text: str) -> tuple[str, str] | None:
+    role = contact_field_role(text)
+    if role is None:
+        return None
+    if role == "contact_label":
+        label_match = re.match(r"^\s*((?:INVESTOR|EDITORIAL)\s+CONTACT:?)", normalize_text(text), flags=re.I)
+        if label_match:
+            return role, label_match.group(1).strip()
+    if role == "contact_company":
+        company_match = CONTACT_COMPANY_RE.search(normalize_text(text))
+        if company_match:
+            return role, company_match.group(0).strip()
+    if role == "contact_phone":
+        phone_match = CONTACT_PHONE_RE.search(normalize_text(text))
+        if phone_match:
+            return role, phone_match.group(0).strip()
+    if role == "contact_email":
+        email_match = CONTACT_EMAIL_RE.search(normalize_text(text))
+        if email_match:
+            return role, email_match.group(0).strip()
+    return role, normalize_text(text).strip()
+
+
+def quote_role_key(text: str) -> str | None:
+    normalized = normalize_for_compare(text)
+    if "chief financial officer" in normalized or "finance chief" in normalized or re.search(r"\bcfo\b", normalized):
+        return "cfo"
+    if (
+        "chief executive officer" in normalized
+        or "president and ceo" in normalized
+        or "president chief executive officer" in normalized
+        or re.search(r"\bceo\b", normalized)
+    ):
+        return "ceo"
+    return None
+
+
+def quote_speaker_title(text: str) -> tuple[str, str]:
+    match = re.search(
+        r"said\s+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z.'-]+){0,3})\s*,\s*([^\"”]+)",
+        text,
+    )
+    if not match:
+        return "", ""
+    speaker = normalize_for_compare(match.group(1))
+    title = normalize_for_compare(match.group(2))
+    title = re.sub(r"[^a-z0-9]+", " ", title).strip()
+    return speaker, title
+
+
+def quote_lead_key(text: str) -> str:
+    match = re.search(r"[\"“]([^\"”]{20,220})[\"”]", normalize_text(text))
+    lead = match.group(1) if match else text
+    return " ".join(tokenize(normalize_for_compare(lead))[:12])
+
+
+def parse_quote_key(key: str) -> tuple[str, str, str, str, bool]:
+    parts = key.split("|")
+    while len(parts) < 5:
+        parts.append("")
+    role, speaker, title, lead, placeholder = parts[:5]
+    return role, speaker, title, lead, placeholder == "1"
+
+
+def quote_group_summary_label(text: str) -> str:
+    role = quote_role_key(text)
+    if role == "ceo":
+        return "CEO quote"
+    if role == "cfo":
+        return "CFO quote"
+    return "quote"
+
+
+def quote_diff_summary(doc_text: str, target_text: str, *, target_name: str) -> str:
+    label = quote_group_summary_label(target_text or doc_text)
+    doc_proof = normalize_proof_text(doc_text).strip()
+    target_proof = normalize_proof_text(target_text).strip()
+    if doc_proof == target_proof:
+        return (
+            f"The {label} block is broadly matched rather than exactly matched. "
+            "The normalized quote wording is the same, but the extracted quote blocks did not qualify for an exact structural match. "
+            f"{target_name.upper()}: {shorten(target_text, 160)} "
+            f"Word: {shorten(doc_text, 160)}"
+        )
+    if normalize_without_punctuation(doc_text) == normalize_without_punctuation(target_text):
+        return (
+            f"The {label} punctuation or encoding is different. "
+            f"{target_name.upper()}: {shorten(target_text, 160)} "
+            f"Word: {shorten(doc_text, 160)}"
+        )
+    return (
+        f"The {label} text is different. "
+        f"{target_name.upper()}: {shorten(target_text, 160)} "
+        f"Word: {shorten(doc_text, 160)}"
+    )
+
+
+def long_narrative_block(block: Block) -> bool:
+    return (
+        not block.table_cell
+        and not block.heading
+        and len(block.normalized) >= 160
+        and len(diff_tokens(block.text)) >= 20
+    )
+
+
+def looks_like_section_lead(block: Block, next_block: Block | None) -> bool:
+    if block.table_cell or block.kind == "footnote" or block.heading:
+        return False
+    if not block.bold:
+        return False
+    if next_block is None or next_block.table_cell or next_block.kind == "footnote":
+        return False
+    text = normalize_text(block.text).strip()
+    if not visible_meaningful(text):
+        return False
+    token_count = len(diff_tokens(text))
+    if token_count == 0 or token_count > 8:
+        return False
+    if len(text) > 80:
+        return False
+    if len(diff_tokens(next_block.text)) < 12:
+        return False
+    if headerish_table_text(text):
+        return False
+    return True
+
+
+def repeated_label_key(text: str) -> str | None:
+    normalized = normalize_for_compare(strip_leading_markers(text))
+    if not normalized:
+        return None
+    tokens = tokenize(normalized)
+    if not tokens or len(tokens) > 4:
+        return None
+    if len(normalized) > 32:
+        return None
+    if any(token in {"quote", "tbc"} for token in tokens):
+        return None
+    if all(token.isdigit() and len(token) == 4 for token in tokens):
+        return normalized
+    if any(token.isdigit() for token in tokens) and len(tokens) > 2:
+        return None
+    if normalized in {"low", "high", "synopsys inc", "synopsys inc.", "gaap eps", "non gaap eps"}:
+        return normalized
+    if len(tokens) <= 2:
+        return normalized
+    if all(len(token) <= 8 for token in tokens):
+        return normalized
+    return None
+
+
+def repeated_label_block(block: Block) -> bool:
+    return repeated_label_key(block.text) is not None
+
+
+STRICT_STRUCTURAL_ROLES = {
+    "table_title",
+    "table_subtitle",
+    "table_column_header",
+    "table_row_label",
+    "table_data_cell",
+    "table_data_label",
+    "section_header",
+    "section_lead",
+}
+
+
+def structural_role_compatible(doc_block: Block, target_block: Block) -> bool:
+    doc_role = doc_block.structure_role or ""
+    target_role = target_block.structure_role or ""
+    if not doc_role or not target_role:
+        return True
+    if doc_role == target_role:
+        return True
+    if doc_role in STRICT_STRUCTURAL_ROLES or target_role in STRICT_STRUCTURAL_ROLES:
+        return False
+    return True
+
+
+def exact_like_match_type(match_type: str) -> bool:
+    return match_type in {"exact", "exact_structural"}
+
+
+def compatible_header_family_roles(doc_role: str, target_role: str) -> bool:
+    return {doc_role, target_role} <= {"table_title", "table_subtitle"}
+
+
+def matching_block_exists(block: Block, candidates: list[Block]) -> bool:
+    key = repeated_label_key(block.text)
+    if key is None:
+        return False
+    return any(repeated_label_key(candidate.text) == key for candidate in candidates)
+
+
+def match_confidence_tier(
+    doc_block: Block,
+    target_block: Block,
+    *,
+    score: float,
+    match_type: str,
+    grouped_match_type: str | None,
+    target_name: str,
+) -> str:
+    if doc_block.structure_role == "section_lead" and target_block.structure_role == "section_lead":
+        if exact_like_match_type(match_type):
+            return "strong"
+        if score >= 0.8:
+            return "strong"
+        if score >= 0.7:
+            return "medium"
+        return "weak"
+    if (
+        doc_block.structure_role
+        and target_block.structure_role
+        and doc_block.structure_role != target_block.structure_role
+        and doc_block.structure_role not in {"paragraph", "table_cell"}
+        and target_block.structure_role not in {"paragraph", "table_cell"}
+    ):
+        if (
+            exact_like_match_type(match_type)
+            and compatible_header_family_roles(doc_block.structure_role, target_block.structure_role)
+            and target_name == "html"
+            and max(len(doc_block.normalized), len(target_block.normalized)) <= 32
+            and similarity(doc_block.normalized, target_block.normalized) >= 0.6
+        ):
+            return "strong"
+        if score >= 0.96 and exact_like_match_type(match_type):
+            return "medium"
+        return "weak"
+    if exact_like_match_type(match_type):
+        if (
+            doc_block.structure_role.startswith("contact_")
+            and target_block.structure_role.startswith("contact_")
+        ):
+            return "strong"
+        if repeated_label_block(doc_block) and repeated_label_block(target_block) and target_name == "html":
+            return "medium"
+        return "strong"
+    if grouped_match_type in {"quote", "footnote", "contact"}:
+        if score >= 0.95:
+            return "strong"
+        if score >= 0.88:
+            return "medium"
+        return "weak"
+    if (
+        target_name == "html"
+        and (
+            repeated_label_block(doc_block)
+            or repeated_label_block(target_block)
+            or len(doc_block.normalized) <= 24
+            or len(target_block.normalized) <= 24
+        )
+    ):
+        if score >= 0.98 and doc_block.normalized == target_block.normalized:
+            return "strong"
+        if score >= 0.9:
+            return "medium"
+        return "weak"
+    if doc_block.table_cell and target_block.table_cell:
+        if score >= 0.9:
+            return "strong"
+        if score >= 0.8:
+            return "medium"
+        return "weak"
+    if repeated_label_block(doc_block) and repeated_label_block(target_block):
+        if score >= 0.985:
+            return "strong"
+        if score >= 0.94:
+            return "medium"
+        return "weak"
+    if long_narrative_block(doc_block) and long_narrative_block(target_block):
+        if score >= 0.96:
+            return "strong"
+        if score >= 0.88:
+            return "medium"
+        return "weak"
+    if score >= 0.95:
+        return "strong"
+    if score >= 0.84:
+        return "medium"
+    return "weak"
+
+
+def next_narrative_neighbor(blocks: list[Block], start_index: int) -> Block | None:
+    for probe in range(start_index + 1, len(blocks)):
+        candidate = blocks[probe]
+        if candidate.table_cell or candidate.kind == "footnote":
+            continue
+        if not visible_meaningful(candidate.text):
+            continue
+        return candidate
+    return None
+
+
+def promote_exact_structural_match(
+    doc_index: int,
+    target_index: int,
+    doc_blocks: list[Block],
+    target_blocks: list[Block],
+    *,
+    grouped_match_type: str | None = None,
+    score: float,
+    match_type: str,
+) -> str:
+    if exact_like_match_type(match_type):
+        return match_type
+    doc_block = doc_blocks[doc_index]
+    target_block = target_blocks[target_index]
+    if grouped_match_type == "contact":
+        payload = contact_field_payload(doc_block.text)
+        if payload is None:
+            return match_type
+        role, doc_value = payload
+        target_value = extract_contact_fields(target_block.text).get(role)
+        if target_value and normalize_proof_text(doc_value) == normalize_proof_text(target_value):
+            return "exact_structural"
+        return match_type
+    if doc_block.structure_role == "section_lead" and target_block.structure_role == "section_lead":
+        if score < 0.78:
+            return match_type
+        next_doc = next_narrative_neighbor(doc_blocks, doc_index)
+        next_target = next_narrative_neighbor(target_blocks, target_index)
+        if next_doc is None or next_target is None:
+            return match_type
+        if similarity(next_doc.normalized, next_target.normalized) >= 0.9:
+            return "exact_structural"
+    return match_type
+
+
+def quote_group_key(block: Block) -> str | None:
+    if block.table_cell or block.heading:
+        return None
+    text = normalize_text(block.text).strip()
+    normalized = normalize_for_compare(text)
+    role = quote_role_key(text) or ""
+    placeholder = "quote tbc" in normalized
+    if len(text) < 40 and not placeholder:
+        return None
+    if '"' not in text and "“" not in text and not placeholder:
+        return None
+    if "said " not in normalized and not placeholder:
+        return None
+    speaker, title = quote_speaker_title(text)
+    lead = quote_lead_key(text)
+    if not any((role, speaker, title, lead)):
+        return None
+    return f"{role}|{speaker}|{title}|{lead}|{'1' if placeholder else '0'}"
+
+
+def footnote_group_key(block: Block) -> str | None:
+    if block.kind == "footnote":
+        return normalize_without_footnote_refs(block.text)
+    if block.table_cell and len(block.normalized) > 80 and block.text[:1].isdigit():
+        return normalize_without_footnote_refs(block.text)
+    return None
+
+
+def leading_footnote_marker(text: str) -> str | None:
+    match = re.match(r"^\s*\(?(\d{1,2})\)?(?=\s+[A-Za-z])", normalize_text(text))
+    if not match:
+        return None
+    return match.group(1)
+
+
+def extract_block_groups(blocks: list[Block]) -> tuple[list[BlockGroup], dict[int, str]]:
+    groups: list[BlockGroup] = []
+    block_to_group: dict[int, str] = {}
+    used_indices: set[int] = set()
+
+    index = 0
+    while index < len(blocks):
+        if index in used_indices:
+            index += 1
+            continue
+        block = blocks[index]
+        contact_key = contact_label_key(block.text)
+        if contact_key:
+            group_indices = [index]
+            used_indices.add(index)
+            probe = index + 1
+            while probe < len(blocks):
+                candidate = blocks[probe]
+                if candidate.table_cell or candidate.heading:
+                    break
+                if contact_label_key(candidate.text):
+                    break
+                if not looks_like_contact_fragment(candidate):
+                    break
+                group_indices.append(probe)
+                used_indices.add(probe)
+                probe += 1
+                if len(group_indices) >= 6:
+                    break
+            group = BlockGroup(
+                group_id=f"{blocks[index].source}-group-contact-{index}",
+                source=blocks[index].source,
+                group_type="contact",
+                block_indices=group_indices,
+                key=contact_key,
+                text="\n".join(blocks[item].text for item in group_indices),
+                order_start=blocks[group_indices[0]].order,
+                order_end=blocks[group_indices[-1]].order,
+            )
+            groups.append(group)
+            for item in group_indices:
+                block_to_group[item] = group.group_id
+            index = probe
+            continue
+
+        quote_key = quote_group_key(block)
+        if quote_key:
+            group = BlockGroup(
+                group_id=f"{block.source}-group-quote-{index}",
+                source=block.source,
+                group_type="quote",
+                block_indices=[index],
+                key=quote_key,
+                text=block.text,
+                order_start=block.order,
+                order_end=block.order,
+            )
+            groups.append(group)
+            block_to_group[index] = group.group_id
+            used_indices.add(index)
+            index += 1
+            continue
+
+        footnote_key = footnote_group_key(block)
+        if footnote_key:
+            marker = block.footnote_marker or leading_footnote_marker(block.text)
+            group = BlockGroup(
+                group_id=f"{block.source}-group-footnote-{index}",
+                source=block.source,
+                group_type="footnote",
+                block_indices=[index],
+                key=footnote_key,
+                text=block.text,
+                order_start=block.order,
+                order_end=block.order,
+                footnote_marker=marker,
+            )
+            groups.append(group)
+            block_to_group[index] = group.group_id
+            used_indices.add(index)
+        index += 1
+
+    return groups, block_to_group
+
+
+def group_similarity(doc_group: BlockGroup, target_group: BlockGroup) -> float:
+    if doc_group.group_type != target_group.group_type:
+        return 0.0
+    if doc_group.group_type == "contact":
+        return 1.0 if doc_group.key == target_group.key else 0.0
+    if doc_group.group_type == "quote":
+        if doc_group.key == target_group.key:
+            return 1.0
+        doc_role, doc_speaker, doc_title, doc_lead, doc_placeholder = parse_quote_key(doc_group.key)
+        target_role, target_speaker, target_title, target_lead, target_placeholder = parse_quote_key(target_group.key)
+        role_match = doc_role and target_role and doc_role == target_role
+        speaker_score = similarity(doc_speaker, target_speaker) if doc_speaker and target_speaker else 0.0
+        title_score = similarity(doc_title, target_title) if doc_title and target_title else 0.0
+        lead_overlap = token_overlap_ratio(doc_lead, target_lead) if doc_lead and target_lead else 0.0
+        key_similarity = similarity(doc_group.key, target_group.key)
+        if role_match and (doc_placeholder or target_placeholder):
+            return max(key_similarity, 0.95)
+        if role_match and speaker_score >= 0.92 and title_score >= 0.72:
+            return max(key_similarity, 0.98)
+        if role_match and max(title_score, speaker_score) >= 0.62:
+            return max(key_similarity, 0.93)
+        if speaker_score >= 0.9 and lead_overlap >= 0.45:
+            return max(key_similarity, 0.92)
+        return max(key_similarity, 0.0)
+    if doc_group.group_type == "footnote":
+        marker_match = (
+            doc_group.footnote_marker is not None
+            and target_group.footnote_marker is not None
+            and doc_group.footnote_marker == target_group.footnote_marker
+        )
+        text_similarity = similarity(doc_group.key, target_group.key)
+        overlap = token_overlap_ratio(doc_group.key, target_group.key)
+        if marker_match and overlap >= 0.45:
+            return max(text_similarity, 0.96)
+        return text_similarity
+    return 0.0
+
+
+def match_block_groups(
+    docx_blocks: list[Block],
+    target_blocks: list[Block],
+) -> tuple[dict[str, str], dict[int, str], dict[int, str], dict[str, BlockGroup], dict[str, BlockGroup]]:
+    doc_groups, doc_block_to_group = extract_block_groups(docx_blocks)
+    target_groups, target_block_to_group = extract_block_groups(target_blocks)
+    doc_group_map = {group.group_id: group for group in doc_groups}
+    target_group_map = {group.group_id: group for group in target_groups}
+
+    group_matches: dict[str, str] = {}
+    used_target_group_ids: set[str] = set()
+
+    for doc_group in doc_groups:
+        best_target: BlockGroup | None = None
+        best_score = 0.0
+        for target_group in target_groups:
+            if target_group.group_id in used_target_group_ids:
+                continue
+            score = group_similarity(doc_group, target_group)
+            if doc_group.group_type == "footnote" and score < 0.88:
+                continue
+            if doc_group.group_type == "quote" and score < 0.9:
+                continue
+            if doc_group.group_type == "contact" and score < 1.0:
+                continue
+            if score > best_score:
+                best_score = score
+                best_target = target_group
+        if best_target is not None:
+            group_matches[doc_group.group_id] = best_target.group_id
+            used_target_group_ids.add(best_target.group_id)
+
+    block_group_match_by_doc_index: dict[int, str] = {}
+    for doc_group_id, target_group_id in group_matches.items():
+        target_group = target_group_map[target_group_id]
+        for block_index in doc_group_map[doc_group_id].block_indices:
+            block_group_match_by_doc_index[block_index] = target_group_id
+
+    return block_group_match_by_doc_index, doc_block_to_group, target_block_to_group, doc_group_map, target_group_map
+
+
 def table_context_match_score(doc_block: Block, html_block: Block) -> float:
     if normalize_for_compare(strip_leading_markers(doc_block.text)) == normalize_for_compare(strip_leading_markers(html_block.text)):
         return 1.0
@@ -264,6 +1339,90 @@ def table_context_match_score(doc_block: Block, html_block: Block) -> float:
     return score
 
 
+def same_cell_numeric_table_match(
+    doc_block: Block,
+    html_block: Block,
+    *,
+    expected_target_table_idx: int | None = None,
+) -> bool:
+    if not doc_block.table_cell or not html_block.table_cell:
+        return False
+    if doc_block.table_pos is None or html_block.table_pos is None:
+        return False
+    if expected_target_table_idx is not None and table_index_key(html_block) != expected_target_table_idx:
+        return False
+    if doc_block.table_pos[1:] != html_block.table_pos[1:]:
+        return False
+    doc_token = single_value_token(doc_block)
+    html_token = single_value_token(html_block)
+    if doc_token is None or html_token is None:
+        return False
+    if doc_token.kind != "number" or html_token.kind != "number":
+        return False
+    if doc_block.row_key and html_block.row_key and similarity(doc_block.row_key, html_block.row_key) < 0.94:
+        return False
+    if (
+        doc_block.numeric_slot is not None
+        and html_block.numeric_slot is not None
+        and doc_block.numeric_slot != html_block.numeric_slot
+    ):
+        return False
+    if (
+        doc_block.row_slot is not None
+        and html_block.row_slot is not None
+        and doc_block.row_slot != html_block.row_slot
+    ):
+        return False
+    return True
+
+
+def prematch_same_cell_numeric_table_blocks(
+    docx_blocks: list[Block],
+    html_blocks: list[Block],
+    table_pos_map: dict[tuple[int, int, int], list[int]],
+    doc_to_html_table_map: dict[int, int] | None = None,
+) -> tuple[list[Match], set[int], set[int]]:
+    used_doc: set[int] = set()
+    used_html: set[int] = set()
+    matches: list[Match] = []
+
+    for doc_index, doc_block in enumerate(docx_blocks):
+        pos_key = mapped_table_pos_key(doc_block, doc_to_html_table_map)
+        if pos_key is None:
+            continue
+        doc_token = single_value_token(doc_block)
+        if doc_token is None or doc_token.kind != "number":
+            continue
+        expected_table_idx = mapped_table_index_key(doc_block, doc_to_html_table_map)
+        candidates = [
+            index
+            for index in table_pos_map.get(pos_key, [])
+            if index not in used_html
+            and same_cell_numeric_table_match(
+                doc_block,
+                html_blocks[index],
+                expected_target_table_idx=expected_table_idx,
+            )
+        ]
+        if not candidates:
+            continue
+        best_index = max(candidates, key=lambda index: similarity(doc_block.normalized, html_blocks[index].normalized))
+        used_doc.add(doc_index)
+        used_html.add(best_index)
+        score = 1.0 if html_blocks[best_index].normalized == doc_block.normalized else 0.95
+        match_type = "exact" if score == 1.0 else "approx"
+        matches.append(
+            Match(
+                docx_index=doc_index,
+                html_index=best_index,
+                match_type=match_type,
+                score=score,
+                formatting_diffs=summarize_formatting_diff(doc_block, html_blocks[best_index]),
+            )
+        )
+    return matches, used_doc, used_html
+
+
 def split_lead_label_text(text: str, *, table_cell: bool = False) -> tuple[str, str] | None:
     if table_cell:
         return None
@@ -277,6 +1436,14 @@ def split_lead_label_text(text: str, *, table_cell: bool = False) -> tuple[str, 
     lead_words = len([word for word in lead.split() if word])
     looks_like_label = len(lead) <= 64 and lead_words <= 8 and not re.search(r"[.!?:;]$", lead)
     body_substantial = len(rest) >= 80
+    if not re.search(r"[A-Za-z]", lead):
+        return None
+    if not re.match(r"^[A-Z][A-Za-z0-9'()/%& .-]+$", lead):
+        return None
+    if not re.match(r"^[\"'(]?[A-Z]", rest):
+        return None
+    if lead_words <= 1 and len(lead) < 12:
+        return None
     if looks_like_label and body_substantial:
         return lead, rest
     return None
@@ -305,6 +1472,55 @@ def normalize_text(text: str) -> str:
     )
 
 
+def normalize_proof_text(text: str) -> str:
+    return (
+        str(text or "")
+        .replace("\u00A0", " ")
+        .replace("\u2018", "'")
+        .replace("\u2019", "'")
+        .replace("\u201C", '"')
+        .replace("\u201D", '"')
+        .replace("\u2013", "-")
+        .replace("\u2014", "-")
+        .replace("\u2022", "-")
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+    )
+
+
+def classify_inline_run(text: str) -> str:
+    if not text:
+        return "text"
+    if text == "\t":
+        return "tab"
+    if text == "\n":
+        return "linebreak"
+    if re.fullmatch(r"[ \t]+", text):
+        return "space"
+    if re.fullmatch(r"\s+", text):
+        return "space"
+    if re.fullmatch(r"[$€£¥%~()\[\]{}:;,.!?/&+\-–—•]+", text):
+        return "symbol"
+    return "text"
+
+
+def block_texts_from_runs(runs: list[InlineRun]) -> tuple[str, str, str]:
+    raw_text = "".join(run.text for run in runs)
+    proof_text = normalize_proof_text(raw_text)
+    match_text = normalize_for_compare(proof_text)
+    return raw_text, proof_text, match_text
+
+
+def formatting_flags_from_runs(runs: list[InlineRun]) -> tuple[bool, bool, bool]:
+    return (
+        any(run.bold for run in runs),
+        any(run.italic for run in runs),
+        any(run.underline for run in runs),
+    )
+
+
 def strip_footnote_markers(text: str) -> str:
     text = normalize_text(text)
     text = LEADING_FOOTNOTE_MARKER_RE.sub("", text)
@@ -317,6 +1533,7 @@ def strip_footnote_markers(text: str) -> str:
 def normalize_for_compare(text: str) -> str:
     text = strip_footnote_markers(text)
     text = re.sub(r"\bwww\.", "", text, flags=re.I)
+    text = re.sub(r"([$€£¥~])\s+(?=\(?\d)", r"\1", text)
     text = re.sub(r"\(\s+(?=\d)", "(", text)
     text = re.sub(r"(\d)\s+%", r"\1%", text)
     text = re.sub(r"(\d)\s+\)", r"\1)", text)
@@ -331,6 +1548,129 @@ def normalize_row_key(text: str) -> str:
     text = re.sub(r"\[\s*\d+\s*\]", "", text)
     text = re.sub(r"\s+", " ", text).strip()
     return normalize_for_compare(text)
+
+
+TABLE_HEADER_TEXT_MARKERS = {
+    "low",
+    "high",
+    "three months ended",
+    "range for three months ending",
+    "range for fiscal year ending",
+    "january 31",
+    "april 30",
+    "july 31",
+    "october 31",
+    "fiscal year ending",
+    "in millions",
+    "in thousands",
+    "except per share amounts",
+}
+
+
+def headerish_table_text(text: str) -> bool:
+    normalized = normalize_row_key(text)
+    if not normalized:
+        return False
+    if normalized in TABLE_HEADER_TEXT_MARKERS:
+        return True
+    if any(marker in normalized for marker in TABLE_HEADER_TEXT_MARKERS):
+        return True
+    tokens = tokenize(normalized)
+    if not tokens:
+        return False
+    if all(token in {"low", "high"} for token in tokens):
+        return True
+    if all(token.isdigit() and len(token) == 4 for token in tokens):
+        return True
+    if DATE_PHRASE_RE.search(text):
+        return True
+    return False
+
+
+def assign_structural_roles(blocks: list[Block]) -> list[Block]:
+    for block in blocks:
+        if block.heading:
+            block.structure_role = "section_header"
+        elif block.table_cell:
+            block.structure_role = "table_cell"
+        elif block.kind == "footnote":
+            block.structure_role = "footnote"
+        else:
+            block.structure_role = "paragraph"
+
+    for index, block in enumerate(blocks):
+        if block.table_cell or block.kind == "footnote":
+            continue
+        next_block = blocks[index + 1] if index + 1 < len(blocks) else None
+        prev_block = blocks[index - 1] if index > 0 else None
+        upcoming_table = any(candidate.table_cell for candidate in blocks[index + 1:index + 4])
+        upcoming_table_index = next(
+            (candidate.table_pos[0] for candidate in blocks[index + 1:index + 4] if candidate.table_cell and candidate.table_pos is not None),
+            None,
+        )
+        text = normalize_text(block.text).strip()
+        token_count = len(diff_tokens(text))
+        if upcoming_table:
+            if text.startswith("(") or (block.italic and token_count <= 20):
+                block.structure_role = "table_subtitle"
+            elif block.heading or block.bold or token_count <= 14:
+                block.structure_role = "table_title"
+            if block.structure_role in {"table_title", "table_subtitle"}:
+                block.family_table_index = upcoming_table_index
+        elif (
+            prev_block is not None
+            and prev_block.structure_role == "table_title"
+            and (text.startswith("(") or block.italic or token_count <= 18)
+        ):
+            block.structure_role = "table_subtitle"
+            block.family_table_index = prev_block.family_table_index
+        elif looks_like_section_lead(block, next_block):
+            block.structure_role = "section_lead"
+
+    table_rows: dict[int, dict[int, list[Block]]] = {}
+    for block in blocks:
+        if not block.table_cell or block.table_pos is None:
+            continue
+        table_idx, row_idx, _col_idx = block.table_pos
+        block.family_table_index = table_idx
+        table_rows.setdefault(table_idx, {}).setdefault(row_idx, []).append(block)
+
+    for rows in table_rows.values():
+        ordered_rows = sorted(rows.items())
+        first_body_row: int | None = None
+        for row_idx, row_blocks in ordered_rows:
+            ordered_blocks = sorted(row_blocks, key=lambda item: (item.row_slot or 0, item.table_pos[2] if item.table_pos else 0))
+            numeric_count = 0
+            first_text_block: Block | None = None
+            for row_block in ordered_blocks:
+                token = single_value_token(row_block)
+                if token is not None and token.kind == "number":
+                    numeric_count += 1
+                if first_text_block is None and visible_meaningful(row_block.text):
+                    first_text_block = row_block
+            if (
+                first_text_block is not None
+                and numeric_count >= 1
+                and not headerish_table_text(first_text_block.text)
+            ):
+                first_body_row = row_idx
+                break
+
+        for row_idx, row_blocks in ordered_rows:
+            header_row = first_body_row is None or row_idx < first_body_row
+            ordered_blocks = sorted(row_blocks, key=lambda item: (item.row_slot or 0, item.table_pos[2] if item.table_pos else 0))
+            for row_block in ordered_blocks:
+                token = single_value_token(row_block)
+                if header_row:
+                    row_block.structure_role = "table_column_header"
+                elif token is not None and token.kind == "number":
+                    row_block.structure_role = "table_data_cell"
+                elif (row_block.row_slot or 0) == 0:
+                    row_block.structure_role = "table_row_label"
+                else:
+                    row_block.structure_role = "table_data_label"
+
+    return blocks
 
 
 def strip_leading_markers(text: str) -> str:
@@ -454,7 +1794,7 @@ def join_words_for_pdf_cluster(
 
 
 def diff_token_kind(token: str) -> str:
-    return "number" if re.fullmatch(r"[+-]?(?:\d[\d,]*(?:\.\d+)?%?|\.\d+%?)", token) else "word"
+    return "number" if re.fullmatch(r"(?:\([+-]?(?:\d[\d,]*(?:\.\d+)?|\.\d+)\)|[+-]?(?:\d[\d,]*(?:\.\d+)?|\.\d+))%?", token) else "word"
 
 
 def normalize_diff_token(token: str) -> str:
@@ -465,7 +1805,7 @@ def normalize_diff_token(token: str) -> str:
 
 
 def diff_tokens(text: str) -> list[DiffToken]:
-    normalized_text = normalize_text(text)
+    normalized_text = normalize_proof_text(text)
     tokens: list[DiffToken] = []
     for match in DIFF_TOKEN_RE.finditer(normalized_text):
         cursor = match.start() - 1
@@ -480,9 +1820,16 @@ def diff_tokens(text: str) -> list[DiffToken]:
                 prefix_symbol = candidate
         token_text = match.group(0)
         token_end = match.end()
+        if prefix_symbol == "(":
+            suffix = normalized_text[token_end:]
+            close_paren_match = re.match(r"(\s*\))", suffix)
+            if close_paren_match:
+                token_text = f"({token_text}{close_paren_match.group(1)}"
+                token_end += close_paren_match.end()
+                prefix_symbol = None
         if diff_token_kind(token_text) == "number" and not token_text.endswith("%"):
             suffix = normalized_text[token_end:]
-            percent_match = re.match(r"(\s+)%(?=\s|$|[),.;:])", suffix)
+            percent_match = re.match(r"(\s*)%(?=\s|$|[),.;:])", suffix)
             if percent_match:
                 token_text = token_text + "%"
                 token_end += percent_match.end()
@@ -767,6 +2114,20 @@ def pdf_block_has_docx_anchor(block: Block, docx_blocks: list[Block]) -> bool:
     return False
 
 
+def pdf_blocks_equal_after_cleanup(doc_block: Block, target_block: Block) -> bool:
+    if normalize_without_footnote_refs(doc_block.text) == normalize_without_footnote_refs(target_block.text):
+        return True
+    if (
+        not doc_block.table_cell
+        and not target_block.table_cell
+        and normalize_pdf_paragraph_artifacts(doc_block.text) == normalize_pdf_paragraph_artifacts(target_block.text)
+    ):
+        return True
+    if normalize_for_compare(strip_leading_markers(doc_block.text)) == normalize_for_compare(strip_leading_markers(target_block.text)):
+        return True
+    return False
+
+
 def short_fragment_subsequence_similarity(fragment_tokens: list[str], container_tokens: list[str]) -> float:
     if not fragment_tokens or not container_tokens:
         return 0.0
@@ -812,13 +2173,18 @@ def containment_match_score(fragment: Block, container: Block) -> float:
     return 0.0
 
 
+def formatting_context_confident(docx: Block, html: Block) -> bool:
+    if docx.table_cell != html.table_cell:
+        return False
+    if len(docx.normalized) < 40 and docx.kind != html.kind and not (docx.heading and html.heading):
+        return False
+    return True
+
+
 def summarize_formatting_diff(docx: Block, html: Block) -> list[str]:
     diffs: list[str] = []
     checks = [
         ("heading", docx.heading, html.heading),
-        ("bold", docx.bold, html.bold),
-        ("italic", docx.italic, html.italic),
-        ("underline", docx.underline, html.underline),
         ("list item", docx.list_item, html.list_item),
         ("table cell", docx.table_cell, html.table_cell),
     ]
@@ -828,12 +2194,219 @@ def summarize_formatting_diff(docx: Block, html: Block) -> list[str]:
                 f"DOCX {'has' if doc_value else 'does not have'} {label}; "
                 f"HTML {'has' if html_value else 'does not have'} it."
             )
+    if formatting_context_confident(docx, html):
+        diffs.extend(compare_inline_formatting_diffs(docx, html))
     if docx.heading and html.heading and docx.heading_level != html.heading_level:
         diffs.append(
             f"DOCX heading level is {docx.heading_level or '?'}; "
             f"HTML heading level is {html.heading_level or '?'}."
         )
+    if (
+        docx.structure_role
+        and html.structure_role
+        and docx.structure_role != html.structure_role
+        and {docx.structure_role, html.structure_role} <= {
+            "table_title",
+            "table_subtitle",
+            "table_column_header",
+            "table_row_label",
+            "table_data_cell",
+            "table_data_label",
+            "section_header",
+            "paragraph",
+        }
+    ):
+        diffs.append(
+            f'DOCX role is "{docx.structure_role}"; HTML role is "{html.structure_role}".'
+        )
     return diffs
+
+
+def _visual_underline(run: InlineRun) -> bool:
+    return run.underline or run.hyperlink
+
+
+def _run_style_enabled(run: InlineRun, style: str) -> bool:
+    if style == "underline":
+        return _visual_underline(run)
+    return bool(getattr(run, style, False))
+
+
+def _block_token_counter(block: Block) -> Counter[str]:
+    counter: Counter[str] = Counter()
+    for token in diff_tokens(block.text):
+        counter[token.normalized] += 1
+    return counter
+
+
+def _run_style_token_counter(
+    block: Block,
+    style: str,
+    allowed_tokens: Counter[str] | None = None,
+) -> Counter[str]:
+    counter: Counter[str] = Counter()
+    remaining = Counter(allowed_tokens) if allowed_tokens is not None else None
+    for run in block.runs:
+        if not _run_style_enabled(run, style):
+            continue
+        for token in diff_tokens(run.text):
+            if remaining is not None:
+                if remaining[token.normalized] <= 0:
+                    continue
+                remaining[token.normalized] -= 1
+            counter[token.normalized] += 1
+    return counter
+
+
+def _run_style_excerpt(
+    block: Block,
+    style: str,
+    allowed_tokens: Counter[str] | None = None,
+) -> str | None:
+    remaining = Counter(allowed_tokens) if allowed_tokens is not None else None
+    for run in block.runs:
+        if not _run_style_enabled(run, style):
+            continue
+        if remaining is not None:
+            matched_parts: list[str] = []
+            for token in diff_tokens(run.text):
+                if remaining[token.normalized] <= 0:
+                    continue
+                remaining[token.normalized] -= 1
+                matched_parts.append(token.text)
+            text = normalize_proof_text(" ".join(matched_parts)).strip()
+        else:
+            text = normalize_proof_text(run.text).strip()
+        if visible_meaningful(text):
+            return text[:60]
+    return None
+
+
+def compare_inline_formatting_diffs(docx: Block, html: Block) -> list[str]:
+    diffs: list[str] = []
+    if not docx.runs or not html.runs:
+        fallback_checks = [
+            ("bold", docx.bold, html.bold),
+            ("italic", docx.italic, html.italic),
+            ("underline", docx.underline, html.underline),
+        ]
+        for label, doc_value, html_value in fallback_checks:
+            if doc_value != html_value:
+                diffs.append(
+                    f"DOCX {'has' if doc_value else 'does not have'} {label}; "
+                    f"HTML {'has' if html_value else 'does not have'} it."
+                )
+        return diffs
+
+    common_tokens = _block_token_counter(docx) & _block_token_counter(html)
+    if not common_tokens:
+        return diffs
+
+    for style in ("bold", "italic", "underline"):
+        doc_counter = _run_style_token_counter(docx, style, common_tokens)
+        html_counter = _run_style_token_counter(html, style, common_tokens)
+        if doc_counter == html_counter:
+            continue
+        doc_only = doc_counter - html_counter
+        html_only = html_counter - doc_counter
+        if not doc_only and not html_only:
+            continue
+        if html_only and not doc_only:
+            excerpt = _run_style_excerpt(html, style, common_tokens)
+            if excerpt:
+                diffs.append(f'DOCX does not have {style} on "{excerpt}"; HTML has it.')
+            else:
+                diffs.append(f"DOCX does not have {style}; HTML has it.")
+            continue
+        if doc_only and not html_only:
+            excerpt = _run_style_excerpt(docx, style, common_tokens)
+            if excerpt:
+                diffs.append(f'DOCX has {style} on "{excerpt}"; HTML does not.')
+            else:
+                diffs.append(f"DOCX has {style}; HTML does not have it.")
+            continue
+        diffs.append(f"DOCX and HTML apply {style} to different text spans.")
+    return diffs
+
+
+def formatting_alignment_score(docx: Block, html: Block) -> float:
+    score = 0.0
+    if docx.structure_role and html.structure_role:
+        if docx.structure_role == html.structure_role:
+            score += 2.0
+        else:
+            score -= 1.25
+    if docx.heading == html.heading:
+        score += 2.0
+    else:
+        score -= 1.0
+    if docx.list_item == html.list_item:
+        score += 1.0
+    else:
+        score -= 0.5
+    if docx.table_cell == html.table_cell:
+        score += 1.5
+    else:
+        score -= 0.75
+    if docx.kind == html.kind:
+        score += 0.5
+    if docx.heading and html.heading and docx.heading_level == html.heading_level:
+        score += 0.5
+    for style in ("bold", "italic", "underline"):
+        if docx.runs and html.runs:
+            if _run_style_token_counter(docx, style) == _run_style_token_counter(html, style):
+                score += 1.25
+            elif bool(getattr(docx, style, False)) == bool(getattr(html, style, False)):
+                score += 0.4
+            else:
+                score -= 0.5
+        else:
+            if bool(getattr(docx, style, False)) == bool(getattr(html, style, False)):
+                score += 0.8
+            else:
+                score -= 0.5
+    return score
+
+
+def select_best_exact_candidate(
+    doc_block: Block,
+    candidate_indices: list[int],
+    html_blocks: list[Block],
+    used_html: set[int],
+) -> int | None:
+    available = [index for index in candidate_indices if index not in used_html]
+    available = [index for index in available if structural_role_compatible(doc_block, html_blocks[index])]
+    if not available:
+        return None
+    ranked = sorted(
+        available,
+        key=lambda index: (
+            formatting_alignment_score(doc_block, html_blocks[index]),
+            -abs(len(doc_block.text) - len(html_blocks[index].text)),
+            -html_blocks[index].order,
+        ),
+        reverse=True,
+    )
+    if repeated_label_block(doc_block) and len(ranked) > 1:
+        top = ranked[0]
+        second = ranked[1]
+        top_score = formatting_alignment_score(doc_block, html_blocks[top])
+        second_score = formatting_alignment_score(doc_block, html_blocks[second])
+        top_group = (
+            doc_block.table_cell == html_blocks[top].table_cell,
+            doc_block.heading == html_blocks[top].heading,
+            doc_block.kind == html_blocks[top].kind,
+            doc_block.structure_role == html_blocks[top].structure_role,
+        )
+        second_group = (
+            doc_block.table_cell == html_blocks[second].table_cell,
+            doc_block.heading == html_blocks[second].heading,
+            doc_block.kind == html_blocks[second].kind,
+            doc_block.structure_role == html_blocks[second].structure_role,
+        )
+        if abs(top_score - second_score) < 1.0 and top_group == second_group:
+            return None
+    return ranked[0]
 
 
 def xml_local_name(tag: str) -> str:
@@ -846,33 +2419,176 @@ def style_flag(style_text: str, needle: str) -> bool:
     return needle in style_text.lower()
 
 
-def collect_word_text(paragraph: ET.Element) -> tuple[str, bool, bool, bool]:
-    text_parts: list[str] = []
-    bold = False
-    italic = False
-    underline = False
-    for run in paragraph.findall(".//w:r", WORD_NS):
-        for child in list(run):
-            local = xml_local_name(child.tag) if isinstance(child.tag, str) else ""
-            if local == "t":
-                text_parts.append(child.text or "")
-            elif local == "tab":
-                text_parts.append("\t")
-            elif local == "br":
-                text_parts.append("\n")
-        run_props = run.find("w:rPr", WORD_NS)
-        if run_props is None:
+def merge_word_format_props(
+    base: dict[str, bool | None] | None,
+    override: dict[str, bool | None] | None,
+) -> dict[str, bool | None]:
+    merged = dict(base or {})
+    for key, value in (override or {}).items():
+        if value is not None:
+            merged[key] = value
+    return merged
+
+
+def word_prop_enabled(rpr: ET.Element | None, tag: str) -> bool | None:
+    if rpr is None:
+        return None
+    child = rpr.find(tag, WORD_NS)
+    if child is None:
+        return None
+    val = (
+        child.get(f"{{{WORD_NS['w']}}}val")
+        or child.get("w:val")
+        or child.get("val")
+    )
+    if xml_local_name(tag) == "u":
+        if val is None:
+            return True
+        return str(val).lower() not in {"none", "0", "false", "off"}
+    if val is None:
+        return True
+    return str(val).lower() not in {"0", "false", "off", "none"}
+
+
+def extract_word_rpr_props(rpr: ET.Element | None) -> dict[str, bool | None]:
+    return {
+        "bold": word_prop_enabled(rpr, "w:b"),
+        "italic": word_prop_enabled(rpr, "w:i"),
+        "underline": word_prop_enabled(rpr, "w:u"),
+    }
+
+
+def word_style_val(node: ET.Element | None, child_tag: str) -> str | None:
+    if node is None:
+        return None
+    child = node.find(child_tag, WORD_NS)
+    if child is None:
+        return None
+    return (
+        child.get(f"{{{WORD_NS['w']}}}val")
+        or child.get("w:val")
+        or child.get("val")
+    )
+
+
+def build_word_style_resolver(archive: zipfile.ZipFile) -> WordStyleResolver:
+    try:
+        styles_xml = archive.read("word/styles.xml")
+    except KeyError:
+        return WordStyleResolver(default_run_props={})
+    root = ET.fromstring(styles_xml)
+    default_run_props = extract_word_rpr_props(root.find("w:docDefaults/w:rPrDefault/w:rPr", WORD_NS))
+    styles: dict[str, WordStyle] = {}
+    hyperlink_style_id: str | None = None
+    for style in root.findall("w:style", WORD_NS):
+        style_id = (
+            style.get(f"{{{WORD_NS['w']}}}styleId")
+            or style.get("w:styleId")
+            or style.get("styleId")
+            or ""
+        )
+        if not style_id:
             continue
-        if run_props.find("w:b", WORD_NS) is not None:
-            bold = True
-        if run_props.find("w:i", WORD_NS) is not None:
-            italic = True
-        if run_props.find("w:u", WORD_NS) is not None:
-            underline = True
-    return "".join(text_parts), bold, italic, underline
+        style_type = (
+            style.get(f"{{{WORD_NS['w']}}}type")
+            or style.get("w:type")
+            or style.get("type")
+            or ""
+        )
+        style_name = word_style_val(style, "w:name") or style_id
+        based_on = word_style_val(style, "w:basedOn")
+        props = extract_word_rpr_props(style.find("w:rPr", WORD_NS))
+        styles[style_id] = WordStyle(
+            style_id=style_id,
+            style_type=style_type,
+            based_on=based_on,
+            name=style_name,
+            props=props,
+        )
+        if style_id.lower() == "hyperlink" or style_name.lower() == "hyperlink":
+            hyperlink_style_id = style_id
+    return WordStyleResolver(
+        default_run_props=default_run_props,
+        styles=styles,
+        hyperlink_style_id=hyperlink_style_id,
+    )
 
 
-def extract_docx_footnote_blocks(archive: zipfile.ZipFile, order_start: int) -> tuple[list[Block], int]:
+def collect_word_runs(paragraph: ET.Element, resolver: WordStyleResolver | None = None) -> list[InlineRun]:
+    runs: list[InlineRun] = []
+    paragraph_props = paragraph.find("w:pPr", WORD_NS)
+    paragraph_style_id = word_style_val(paragraph_props, "w:pStyle")
+    paragraph_style_props = resolver.resolve_style_props(paragraph_style_id) if resolver else {}
+    paragraph_direct_props = extract_word_rpr_props(paragraph_props.find("w:rPr", WORD_NS) if paragraph_props is not None else None)
+
+    def walk(node: ET.Element, *, hyperlink: bool = False) -> None:
+        local = xml_local_name(node.tag) if isinstance(node.tag, str) else ""
+        if local == "hyperlink":
+            for child in list(node):
+                if isinstance(child.tag, str):
+                    walk(child, hyperlink=True)
+            return
+        if local == "r":
+            run_index = len(runs)
+            run_props = node.find("w:rPr", WORD_NS)
+            run_style_id = word_style_val(run_props, "w:rStyle")
+            effective_props = dict(resolver.default_run_props) if resolver else {}
+            effective_props = merge_word_format_props(effective_props, paragraph_style_props)
+            effective_props = merge_word_format_props(effective_props, paragraph_direct_props)
+            if resolver and hyperlink and resolver.hyperlink_style_id:
+                effective_props = merge_word_format_props(
+                    effective_props,
+                    resolver.resolve_style_props(resolver.hyperlink_style_id),
+                )
+            if resolver and run_style_id:
+                effective_props = merge_word_format_props(effective_props, resolver.resolve_style_props(run_style_id))
+            effective_props = merge_word_format_props(effective_props, extract_word_rpr_props(run_props))
+            bold = bool(effective_props.get("bold"))
+            italic = bool(effective_props.get("italic"))
+            underline = bool(effective_props.get("underline"))
+            for child in list(node):
+                child_local = xml_local_name(child.tag) if isinstance(child.tag, str) else ""
+                text = ""
+                if child_local == "t":
+                    text = child.text or ""
+                elif child_local == "tab":
+                    text = "\t"
+                elif child_local == "br":
+                    text = "\n"
+                if text == "":
+                    continue
+                runs.append(
+                    InlineRun(
+                        text=text,
+                        kind=classify_inline_run(text),
+                        bold=bold,
+                        italic=italic,
+                        underline=underline,
+                        hyperlink=hyperlink,
+                        source_index=run_index,
+                    )
+                )
+            return
+        for child in list(node):
+            if isinstance(child.tag, str):
+                walk(child, hyperlink=hyperlink)
+
+    walk(paragraph)
+    return runs
+
+
+def collect_word_text(paragraph: ET.Element) -> tuple[str, bool, bool, bool]:
+    runs = collect_word_runs(paragraph)
+    raw_text, proof_text, _match_text = block_texts_from_runs(runs)
+    bold, italic, underline = formatting_flags_from_runs(runs)
+    return (proof_text if proof_text else raw_text), bold, italic, underline
+
+
+def extract_docx_footnote_blocks(
+    archive: zipfile.ZipFile,
+    order_start: int,
+    resolver: WordStyleResolver | None = None,
+) -> tuple[list[Block], int]:
     try:
         xml_text = archive.read("word/footnotes.xml")
     except KeyError:
@@ -888,23 +2604,36 @@ def extract_docx_footnote_blocks(archive: zipfile.ZipFile, order_start: int) -> 
             or footnote.get("type")
             or ""
         )
+        footnote_id = (
+            footnote.get(f"{{{WORD_NS['w']}}}id")
+            or footnote.get("w:id")
+            or footnote.get("id")
+            or ""
+        )
         if footnote_type in {"separator", "continuationSeparator", "continuationNotice"}:
             continue
         for paragraph in footnote.findall(".//w:p", WORD_NS):
-            text, bold, italic, underline = collect_word_text(paragraph)
-            if not visible_meaningful(text):
+            runs = collect_word_runs(paragraph, resolver=resolver)
+            raw_text, proof_text, match_text = block_texts_from_runs(runs)
+            if not visible_meaningful(proof_text):
                 continue
+            bold, italic, underline = formatting_flags_from_runs(runs)
             blocks.append(
                 Block(
                     id=f"docx-{order}",
                     source="docx",
                     order=order,
-                    text=normalize_text(text).strip(),
-                    normalized=normalize_for_compare(text),
+                    text=proof_text.strip(),
+                    normalized=match_text,
+                    raw_text=raw_text,
+                    proof_text=proof_text,
+                    match_text=match_text,
                     bold=bold,
                     italic=italic,
                     underline=underline,
                     kind="footnote",
+                    footnote_marker=str(footnote_id) if str(footnote_id).isdigit() else None,
+                    runs=runs,
                 )
             )
             order += 1
@@ -913,6 +2642,7 @@ def extract_docx_footnote_blocks(archive: zipfile.ZipFile, order_start: int) -> 
 
 def extract_docx_blocks(path: Path) -> list[Block]:
     with zipfile.ZipFile(path) as archive:
+        resolver = build_word_style_resolver(archive)
         xml_text = archive.read("word/document.xml")
         root = ET.fromstring(xml_text)
         body = root.find("w:body", WORD_NS)
@@ -937,9 +2667,11 @@ def extract_docx_blocks(path: Path) -> list[Block]:
                             or style.get("val", "")
                         )
                     list_item = para_props.find("w:numPr", WORD_NS) is not None
-                text, bold, italic, underline = collect_word_text(child)
-                if not visible_meaningful(text):
+                runs = collect_word_runs(child, resolver=resolver)
+                raw_text, proof_text, match_text = block_texts_from_runs(runs)
+                if not visible_meaningful(proof_text):
                     continue
+                bold, italic, underline = formatting_flags_from_runs(runs)
                 heading_match = re.search(r"heading\s*([1-6])?", style_val, flags=re.I)
                 is_title = re.search(r"title", style_val, flags=re.I)
                 heading = bool(heading_match or is_title)
@@ -949,8 +2681,11 @@ def extract_docx_blocks(path: Path) -> list[Block]:
                         id=f"docx-{order}",
                         source="docx",
                         order=order,
-                        text=normalize_text(text).strip(),
-                        normalized=normalize_for_compare(text),
+                        text=proof_text.strip(),
+                        normalized=match_text,
+                        raw_text=raw_text,
+                        proof_text=proof_text,
+                        match_text=match_text,
                         heading=heading,
                         heading_level=heading_level,
                         bold=bold,
@@ -958,43 +2693,61 @@ def extract_docx_blocks(path: Path) -> list[Block]:
                         underline=underline,
                         list_item=list_item,
                         kind="p",
+                        runs=runs,
                     )
                 )
                 order += 1
             elif local == "tbl":
-                rows = child.findall(".//w:tr", WORD_NS)
+                rows = child.findall("w:tr", WORD_NS)
                 for row_index, row in enumerate(rows):
-                    row_cells: list[tuple[int, str, bool, bool, bool]] = []
+                    row_cells: list[tuple[int, str, str, str, bool, bool, bool, list[InlineRun]]] = []
                     for col_index, cell in enumerate(row.findall("w:tc", WORD_NS)):
-                        cell_parts: list[str] = []
+                        cell_runs: list[InlineRun] = []
                         bold = False
                         italic = False
                         underline = False
                         for paragraph in cell.findall(".//w:p", WORD_NS):
-                            text, p_bold, p_italic, p_underline = collect_word_text(paragraph)
-                            if visible_meaningful(text):
-                                cell_parts.append(normalize_text(text).strip())
-                            bold = bold or p_bold
-                            italic = italic or p_italic
-                            underline = underline or p_underline
-                        cell_text = "\n".join(part for part in cell_parts if part)
-                        row_cells.append((col_index, cell_text, bold, italic, underline))
+                            paragraph_runs = collect_word_runs(paragraph, resolver=resolver)
+                            if not paragraph_runs:
+                                continue
+                            if cell_runs:
+                                cell_runs.append(
+                                    InlineRun(
+                                        text="\n",
+                                        kind="linebreak",
+                                        source_index=len(cell_runs),
+                                    )
+                                )
+                            cell_runs.extend(paragraph_runs)
+                            bold = bold or any(run.bold for run in paragraph_runs)
+                            italic = italic or any(run.italic for run in paragraph_runs)
+                            underline = underline or any(run.underline for run in paragraph_runs)
+                        cell_raw_text, cell_proof_text, cell_match_text = block_texts_from_runs(cell_runs)
+                        row_cells.append((col_index, cell_raw_text, cell_proof_text, cell_match_text, bold, italic, underline, cell_runs))
                     row_key = next(
-                        (normalize_row_key(text) for _col_index, text, _bold, _italic, _underline in row_cells if visible_meaningful(text)),
+                        (
+                            normalize_row_key(cell_proof_text)
+                            for _col_index, _cell_raw_text, cell_proof_text, _cell_match_text, _bold, _italic, _underline, _cell_runs in row_cells
+                            if visible_meaningful(cell_proof_text)
+                        ),
                         None,
                     )
                     row_slot = 0
                     numeric_slot = 0
-                    for col_index, cell_text, bold, italic, underline in row_cells:
-                        if not visible_meaningful(cell_text):
+                    for col_index, cell_raw_text, cell_proof_text, cell_match_text, bold, italic, underline, cell_runs in row_cells:
+                        if not visible_meaningful(cell_proof_text):
                             continue
                         token = single_value_token(
                             Block(
                                 id="",
                                 source="docx",
                                 order=0,
-                                text=cell_text,
-                                normalized=normalize_for_compare(cell_text),
+                                text=cell_proof_text.strip(),
+                                normalized=cell_match_text,
+                                raw_text=cell_raw_text,
+                                proof_text=cell_proof_text,
+                                match_text=cell_match_text,
+                                runs=cell_runs,
                             )
                         )
                         cell_numeric_slot = None
@@ -1006,8 +2759,11 @@ def extract_docx_blocks(path: Path) -> list[Block]:
                                 id=f"docx-{order}",
                                 source="docx",
                                 order=order,
-                                text=cell_text,
-                                normalized=normalize_for_compare(cell_text),
+                                text=cell_proof_text.strip(),
+                                normalized=cell_match_text,
+                                raw_text=cell_raw_text,
+                                proof_text=cell_proof_text,
+                                match_text=cell_match_text,
                                 bold=bold,
                                 italic=italic,
                                 underline=underline,
@@ -1017,15 +2773,16 @@ def extract_docx_blocks(path: Path) -> list[Block]:
                                 row_key=row_key,
                                 row_slot=row_slot,
                                 numeric_slot=cell_numeric_slot,
+                                runs=cell_runs,
                             )
                         )
                         order += 1
                         row_slot += 1
                 table_ordinal += 1
 
-        footnote_blocks, order = extract_docx_footnote_blocks(archive, order)
+        footnote_blocks, order = extract_docx_footnote_blocks(archive, order, resolver=resolver)
         blocks.extend(footnote_blocks)
-        return blocks
+        return assign_structural_roles(blocks)
 
 
 def get_descendant_text(element: ET.Element) -> str:
@@ -1033,6 +2790,124 @@ def get_descendant_text(element: ET.Element) -> str:
     for text in element.itertext():
         parts.append(text)
     return normalize_text("".join(parts))
+
+
+def collect_html_inline_runs(
+    element: ET.Element,
+    *,
+    inherited_bold: bool = False,
+    inherited_italic: bool = False,
+    inherited_underline: bool = False,
+    inherited_hyperlink: bool = False,
+    run_index_start: int = 0,
+) -> list[InlineRun]:
+    runs: list[InlineRun] = []
+    if not isinstance(element.tag, str):
+        return runs
+    style = (element.get("style") or "").lower()
+    tag = xml_local_name(element.tag).lower()
+    if tag == "br":
+        return [
+            InlineRun(
+                text="\n",
+                kind="linebreak",
+                bold=inherited_bold,
+                italic=inherited_italic,
+                underline=inherited_underline,
+                hyperlink=inherited_hyperlink,
+                source_index=run_index_start,
+            )
+        ]
+    bold = inherited_bold or tag in INLINE_BOLD_TAGS or style_flag(style, "font-weight: bold")
+    italic = inherited_italic or tag in INLINE_ITALIC_TAGS or style_flag(style, "font-style: italic")
+    underline = inherited_underline or tag in INLINE_UNDERLINE_TAGS or style_flag(style, "text-decoration: underline")
+    hyperlink = inherited_hyperlink or tag == "a"
+
+    def append_text(text: str | None, source_index: int) -> None:
+        if not text:
+            return
+        runs.append(
+            InlineRun(
+                text=text,
+                kind=classify_inline_run(text),
+                bold=bold,
+                italic=italic,
+                underline=underline,
+                hyperlink=hyperlink,
+                source_index=source_index,
+            )
+        )
+
+    append_text(element.text, run_index_start)
+    child_index = run_index_start + 1
+    for child in list(element):
+        runs.extend(
+            collect_html_inline_runs(
+                child,
+                inherited_bold=bold,
+                inherited_italic=italic,
+                inherited_underline=underline,
+                inherited_hyperlink=hyperlink,
+                run_index_start=child_index,
+            )
+        )
+        child_index += 1
+        append_text(child.tail, child_index)
+        child_index += 1
+    return runs
+
+
+def split_inline_runs_by_proof_text(runs: list[InlineRun], lead_text: str, rest_text: str) -> tuple[list[InlineRun], list[InlineRun]]:
+    lead_len = len(normalize_proof_text(lead_text))
+    rest_len = len(normalize_proof_text(rest_text))
+    if lead_len <= 0:
+        return [], runs
+    lead_runs: list[InlineRun] = []
+    rest_runs: list[InlineRun] = []
+    consumed = 0
+    total_target = lead_len + rest_len
+    for run in runs:
+        proof_chunk = normalize_proof_text(run.text)
+        if not proof_chunk:
+            continue
+        chunk_len = len(proof_chunk)
+        next_consumed = consumed + chunk_len
+        if consumed >= total_target:
+            break
+        if next_consumed <= lead_len:
+            lead_runs.append(run)
+        elif consumed >= lead_len:
+            rest_runs.append(run)
+        else:
+            split_at = lead_len - consumed
+            lead_text_part = proof_chunk[:split_at]
+            rest_text_part = proof_chunk[split_at:]
+            if lead_text_part:
+                lead_runs.append(
+                    InlineRun(
+                        text=lead_text_part,
+                        kind=classify_inline_run(lead_text_part),
+                        bold=run.bold,
+                        italic=run.italic,
+                        underline=run.underline,
+                        hyperlink=run.hyperlink,
+                        source_index=run.source_index,
+                    )
+                )
+            if rest_text_part:
+                rest_runs.append(
+                    InlineRun(
+                        text=rest_text_part,
+                        kind=classify_inline_run(rest_text_part),
+                        bold=run.bold,
+                        italic=run.italic,
+                        underline=run.underline,
+                        hyperlink=run.hyperlink,
+                        source_index=run.source_index,
+                    )
+                )
+        consumed = next_consumed
+    return lead_runs, rest_runs
 
 
 def node_has_descendant_block(element: ET.Element) -> bool:
@@ -1119,9 +2994,11 @@ def walk_html_blocks(element: ET.Element, blocks: list[Block], order_ref: list[i
         if not capture_self:
             capture_self = not node_has_descendant_block(element)
         if capture_self:
-            text = get_descendant_text(element).strip()
+            runs = collect_html_inline_runs(element)
+            raw_text, proof_text, match_text = block_texts_from_runs(runs)
+            text = proof_text.strip()
             if visible_meaningful(text):
-                bold, italic, underline = detect_inline_flags(element)
+                bold, italic, underline = formatting_flags_from_runs(runs)
                 heading_level = int(tag[1]) if re.fullmatch(r"h[1-6]", tag) else None
                 table_cell = tag in {"td", "th"}
                 split = split_lead_label_text(text, table_cell=table_cell)
@@ -1136,17 +3013,32 @@ def walk_html_blocks(element: ET.Element, blocks: list[Block], order_ref: list[i
                     "table_cell": table_cell,
                     "kind": tag,
                     "table_pos": html_table_position(element, getattr(element, "_root", element)),
+                    "footnote_marker": leading_footnote_marker(text),
                 }
                 if split:
                     lead, rest = split
+                    lead_runs, rest_runs = split_inline_runs_by_proof_text(runs, lead, rest)
+                    lead_raw_text, lead_proof_text, lead_match_text = block_texts_from_runs(lead_runs)
+                    rest_raw_text, rest_proof_text, rest_match_text = block_texts_from_runs(rest_runs)
+                    lead_bold, lead_italic, lead_underline = formatting_flags_from_runs(lead_runs)
+                    rest_bold, rest_italic, rest_underline = formatting_flags_from_runs(rest_runs)
                     order = order_ref[0]
                     blocks.append(
                         Block(
                             id=f"html-{order}",
                             order=order,
-                            text=lead,
-                            normalized=normalize_for_compare(lead),
-                            **base_kwargs,
+                            text=lead_proof_text.strip() or lead,
+                            normalized=lead_match_text or normalize_for_compare(lead),
+                            raw_text=lead_raw_text,
+                            proof_text=lead_proof_text or lead,
+                            match_text=lead_match_text or normalize_for_compare(lead),
+                            runs=lead_runs or runs,
+                            **{
+                                **base_kwargs,
+                                "bold": lead_bold,
+                                "italic": lead_italic,
+                                "underline": lead_underline,
+                            },
                         )
                     )
                     order_ref[0] += 1
@@ -1155,15 +3047,19 @@ def walk_html_blocks(element: ET.Element, blocks: list[Block], order_ref: list[i
                         Block(
                             id=f"html-{order}",
                             order=order,
-                            text=rest,
-                            normalized=normalize_for_compare(rest),
+                            text=rest_proof_text.strip() or rest,
+                            normalized=rest_match_text or normalize_for_compare(rest),
+                            raw_text=rest_raw_text,
+                            proof_text=rest_proof_text or rest,
+                            match_text=rest_match_text or normalize_for_compare(rest),
+                            runs=rest_runs or runs,
                             **{
                                 **base_kwargs,
                                 "heading": False,
                                 "heading_level": None,
-                                "bold": False,
-                                "italic": False,
-                                "underline": False,
+                                "bold": rest_bold,
+                                "italic": rest_italic,
+                                "underline": rest_underline,
                             },
                         )
                     )
@@ -1175,7 +3071,11 @@ def walk_html_blocks(element: ET.Element, blocks: list[Block], order_ref: list[i
                             id=f"html-{order}",
                             order=order,
                             text=text,
-                            normalized=normalize_for_compare(text),
+                            normalized=match_text,
+                            raw_text=raw_text,
+                            proof_text=proof_text,
+                            match_text=match_text,
+                            runs=runs,
                             **base_kwargs,
                         )
                     )
@@ -1201,7 +3101,7 @@ def extract_html_blocks(path: Path) -> list[Block]:
         body = root
     blocks: list[Block] = []
     walk_html_blocks(body, blocks, [0])
-    return blocks
+    return assign_structural_roles(blocks)
 
 
 def browser_render_and_extract(html_path: Path, output_pdf: Path) -> BrowserRenderResult:
@@ -1218,23 +3118,37 @@ def browser_render_and_extract(html_path: Path, output_pdf: Path) -> BrowserRend
   const italicTags = new Set(['I','EM']);
   const underlineTags = new Set(['U']);
 
-  const normalizeText = (text) => String(text || '')
+  const normalizeProofText = (text) => String(text || '')
     .replace(/\\u00A0/g, ' ')
+    .replace(/[\\u2018\\u2019]/g, "'")
+    .replace(/[\\u201C\\u201D]/g, '"')
+    .replace(/[\\u2013\\u2014]/g, '-')
+    .replace(/\\u2022/g, '-')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+  const normalizeMatchText = (text) => normalizeProofText(text)
     .replace(/\\bwww\\./gi, '')
-    .replace(/[ \\t\\r\\f\\v]+/g, ' ')
-    .trim();
+    .replace(/\\(\\s+(?=\\d)/g, '(')
+    .replace(/(\\d)\\s+%/g, '$1%')
+    .replace(/(\\d)\\s+\\)/g, '$1)')
+    .replace(/([+-])\\s+(?=\\d)/g, '$1')
+    .replace(/\\s+/g, ' ')
+    .trim()
+    .toLowerCase();
   const DIFF_TOKEN_RE = /\\d[\\d,]*(?:\\.\\d+)?%?|\\.\\d+%?|[A-Za-z]+(?:[’'\\-][A-Za-z]+)*/g;
 
   const diffTokenKind = (token) => /^[+-]?(?:\\d[\\d,]*(?:\\.\\d+)?%?|\\.\\d+%?)$/.test(token) ? 'number' : 'word';
   const normalizeDiffToken = (token) => {
-    const cleaned = normalizeText(token);
+    const cleaned = normalizeProofText(token).trim();
     return diffTokenKind(cleaned) === 'number'
       ? cleaned.replace(/,/g, '').toLowerCase()
       : cleaned.toLowerCase();
   };
   const diffTokensText = (text) => {
     const tokens = [];
-    const source = normalizeText(text);
+    const source = normalizeProofText(text);
     DIFF_TOKEN_RE.lastIndex = 0;
     let match;
     while ((match = DIFF_TOKEN_RE.exec(source)) !== null) {
@@ -1257,10 +3171,23 @@ def browser_render_and_extract(html_path: Path, output_pdf: Path) -> BrowserRend
     const leadWords = lead.split(/\\s+/).filter(Boolean).length;
     const looksLikeLabel = lead.length <= 64 && leadWords <= 8 && !/[.!?:;]$/.test(lead);
     const bodySubstantial = rest.length >= 80;
+    if (!/[A-Za-z]/.test(lead)) return null;
+    if (!/^[A-Z][A-Za-z0-9'()/%& .-]+$/.test(lead)) return null;
+    if (!/^[\"'(]?[A-Z]/.test(rest)) return null;
+    if (leadWords <= 1 && lead.length < 12) return null;
     return looksLikeLabel && bodySubstantial ? { lead, rest } : null;
   };
 
-  const visibleMeaningful = (text) => /[A-Za-z0-9]/.test(normalizeText(text));
+  const visibleMeaningful = (text) => /[A-Za-z0-9]/.test(normalizeMatchText(text));
+
+  const classifyRunKind = (text) => {
+    if (!text) return 'text';
+    if (text === '\\t') return 'tab';
+    if (text === '\\n') return 'linebreak';
+    if (/^[\\s]+$/.test(text)) return 'space';
+    if (/^[$€£¥%~()\\[\\]{}:;,.!?/&+\\-–—•]+$/.test(text)) return 'symbol';
+    return 'text';
+  };
 
   function isHidden(el) {
     const style = window.getComputedStyle(el);
@@ -1275,21 +3202,57 @@ def browser_render_and_extract(html_path: Path, output_pdf: Path) -> BrowserRend
     return false;
   }
 
-  function detectInlineFlags(el) {
-    let bold = false;
-    let italic = false;
-    let underline = false;
-    for (const node of el.querySelectorAll('*')) {
-      const style = window.getComputedStyle(node);
-      if (boldTags.has(node.tagName) || parseInt(style.fontWeight || '400', 10) >= 600) bold = true;
-      if (italicTags.has(node.tagName) || style.fontStyle === 'italic') italic = true;
-      if (underlineTags.has(node.tagName) || (style.textDecorationLine || '').includes('underline')) underline = true;
+  function formattingFlagsFromRuns(runs) {
+    return {
+      bold: runs.some(run => !!run.bold),
+      italic: runs.some(run => !!run.italic),
+      underline: runs.some(run => !!run.underline),
+    };
+  }
+
+  function collectInlineRuns(el) {
+    const runs = [];
+    let index = 0;
+
+    const appendRun = (text, parent) => {
+      if (!text) return;
+      const style = window.getComputedStyle(parent);
+      const bold = boldTags.has(parent.tagName) || parseInt(style.fontWeight || '400', 10) >= 600;
+      const italic = italicTags.has(parent.tagName) || style.fontStyle === 'italic';
+      const underline = underlineTags.has(parent.tagName) || (style.textDecorationLine || '').includes('underline');
+      const hyperlink = Boolean(parent.closest('a'));
+      runs.push({
+        text,
+        kind: classifyRunKind(text),
+        bold,
+        italic,
+        underline,
+        hyperlink,
+        source_index: index,
+      });
+      index += 1;
+    };
+
+    const walkNode = (node, parent) => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        appendRun(node.nodeValue || '', parent);
+        return;
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) return;
+      const element = /** @type {HTMLElement} */ (node);
+      if (element.tagName === 'BR') {
+        appendRun('\\n', parent);
+        return;
+      }
+      for (const child of element.childNodes) {
+        walkNode(child, element);
+      }
+    };
+
+    for (const child of el.childNodes) {
+      walkNode(child, el);
     }
-    const selfStyle = window.getComputedStyle(el);
-    if (boldTags.has(el.tagName) || parseInt(selfStyle.fontWeight || '400', 10) >= 600) bold = true;
-    if (italicTags.has(el.tagName) || selfStyle.fontStyle === 'italic') italic = true;
-    if (underlineTags.has(el.tagName) || (selfStyle.textDecorationLine || '').includes('underline')) underline = true;
-    return { bold, italic, underline };
+    return runs;
   }
 
   function collectTokenRects(el) {
@@ -1338,23 +3301,26 @@ def browser_render_and_extract(html_path: Path, output_pdf: Path) -> BrowserRend
       let captureSelf = ['TD','TH','LI','PRE','BLOCKQUOTE','CAPTION','FIGCAPTION'].includes(el.tagName);
       if (!captureSelf) captureSelf = !hasDescendantBlock(el);
       if (captureSelf) {
-        const text = normalizeText(el.innerText || el.textContent || '');
-        if (visibleMeaningful(text)) {
-          const rect = el.getBoundingClientRect();
-          const flags = detectInlineFlags(el);
+          const runs = collectInlineRuns(el);
+          const rawText = runs.map(run => run.text).join('');
+          const proofText = normalizeProofText(rawText);
+          const text = proofText.trim();
+          if (visibleMeaningful(text)) {
+            const rect = el.getBoundingClientRect();
+          const flags = formattingFlagsFromRuns(runs);
           const tokenRects = collectTokenRects(el);
           const headingMatch = /^H([1-6])$/.exec(el.tagName);
           const tableEl = ['TD', 'TH'].includes(el.tagName) ? el.closest('table') : null;
           const trEl = ['TD', 'TH'].includes(el.tagName) ? el.closest('tr') : null;
           const tableRows = tableEl ? Array.from(tableEl.querySelectorAll('tr')) : [];
           const cellSiblings = trEl ? Array.from(trEl.children).filter(child => child.tagName === 'TD' || child.tagName === 'TH') : [];
-          const meaningfulCellSiblings = cellSiblings.filter(cell => visibleMeaningful(normalizeText(cell.innerText || cell.textContent || '')));
+          const meaningfulCellSiblings = cellSiblings.filter(cell => visibleMeaningful(normalizeProofText(cell.innerText || cell.textContent || '')));
           const numericMeaningfulCellSiblings = meaningfulCellSiblings.filter(cell => {
             const tokens = diffTokensText(cell.innerText || cell.textContent || '');
             return tokens.length === 1 && tokens[0].kind === 'number';
           });
-          const rowKeyCell = cellSiblings.find(cell => visibleMeaningful(normalizeText(cell.innerText || cell.textContent || '')));
-          const normalizeRowKey = (text) => normalizeText(text)
+          const rowKeyCell = cellSiblings.find(cell => visibleMeaningful(normalizeProofText(cell.innerText || cell.textContent || '')));
+          const normalizeRowKey = (text) => normalizeProofText(text)
             .replace(/\\(\\s*\\d+\\s*\\)/g, '')
             .replace(/\\[\\s*\\d+\\s*\\]/g, '')
             .replace(/\\s+/g, ' ')
@@ -1368,7 +3334,10 @@ def browser_render_and_extract(html_path: Path, output_pdf: Path) -> BrowserRend
             source: 'html',
             order,
             text,
-            normalized: '',
+            normalized: normalizeMatchText(text),
+            raw_text: rawText,
+            proof_text: proofText,
+            match_text: normalizeMatchText(text),
             heading: Boolean(headingMatch),
             heading_level: headingMatch ? Number(headingMatch[1]) : null,
             bold: flags.bold,
@@ -1390,6 +3359,7 @@ def browser_render_and_extract(html_path: Path, output_pdf: Path) -> BrowserRend
             width: rect.width,
             height: rect.height,
             tokens: tokenRects,
+            runs,
           };
           const split = splitLeadLabelText(text, block.table_cell);
           if (split) {
@@ -1397,13 +3367,51 @@ def browser_render_and_extract(html_path: Path, output_pdf: Path) -> BrowserRend
             const restTokens = diffTokensText(split.rest);
             const leadCount = leadTokens.length;
             const restCount = restTokens.length;
+            const leadRuns = [];
+            const restRuns = [];
+            let consumed = 0;
+            const leadLen = normalizeProofText(split.lead).length;
+            const totalLen = leadLen + normalizeProofText(split.rest).length;
+            for (const run of runs) {
+              const proofChunk = normalizeProofText(run.text);
+              if (!proofChunk) continue;
+              const chunkLen = proofChunk.length;
+              const nextConsumed = consumed + chunkLen;
+              if (consumed >= totalLen) break;
+              if (nextConsumed <= leadLen) {
+                leadRuns.push(run);
+              } else if (consumed >= leadLen) {
+                restRuns.push(run);
+              } else {
+                const splitAt = leadLen - consumed;
+                const leadTextPart = proofChunk.slice(0, splitAt);
+                const restTextPart = proofChunk.slice(splitAt);
+                if (leadTextPart) {
+                  leadRuns.push({ ...run, text: leadTextPart, kind: classifyRunKind(leadTextPart) });
+                }
+                if (restTextPart) {
+                  restRuns.push({ ...run, text: restTextPart, kind: classifyRunKind(restTextPart) });
+                }
+              }
+              consumed = nextConsumed;
+            }
+            const leadFlags = formattingFlagsFromRuns(leadRuns);
+            const restFlags = formattingFlagsFromRuns(restRuns);
             el.setAttribute('data-docx-compare-order', String(order));
             blocks.push({
               ...block,
               id: `html-${order}`,
               order,
               text: split.lead,
+              raw_text: split.lead,
+              proof_text: split.lead,
+              match_text: normalizeMatchText(split.lead),
+              normalized: normalizeMatchText(split.lead),
               tokens: tokenRects.slice(0, leadCount),
+              bold: leadFlags.bold,
+              italic: leadFlags.italic,
+              underline: leadFlags.underline,
+              runs: leadRuns.length ? leadRuns : runs,
             });
             order += 1;
             blocks.push({
@@ -1411,12 +3419,17 @@ def browser_render_and_extract(html_path: Path, output_pdf: Path) -> BrowserRend
               id: `html-${order}`,
               order,
               text: split.rest,
+              raw_text: split.rest,
+              proof_text: split.rest,
+              match_text: normalizeMatchText(split.rest),
+              normalized: normalizeMatchText(split.rest),
               heading: false,
               heading_level: null,
-              bold: false,
-              italic: false,
-              underline: false,
+              bold: restFlags.bold,
+              italic: restFlags.italic,
+              underline: restFlags.underline,
               tokens: tokenRects.slice(leadCount, leadCount + restCount),
+              runs: restRuns.length ? restRuns : runs,
             });
             order += 1;
           } else {
@@ -1498,7 +3511,10 @@ def browser_render_and_extract(html_path: Path, output_pdf: Path) -> BrowserRend
                 source="html",
                 order=order,
                 text=str(item["text"]),
-                normalized=normalize_for_compare(str(item["text"])),
+                normalized=str(item.get("match_text", normalize_for_compare(str(item["text"])))),
+                raw_text=str(item.get("raw_text", item["text"])),
+                proof_text=str(item.get("proof_text", item["text"])),
+                match_text=str(item.get("match_text", normalize_for_compare(str(item["text"])))),
                 heading=bool(item["heading"]),
                 heading_level=int(item["heading_level"]) if item["heading_level"] is not None else None,
                 bold=bool(item["bold"]),
@@ -1515,10 +3531,23 @@ def browser_render_and_extract(html_path: Path, output_pdf: Path) -> BrowserRend
                 row_key=normalize_row_key(str(item["row_key"])) if item.get("row_key") else None,
                 row_slot=int(item["row_slot"]) if item.get("row_slot") is not None else None,
                 numeric_slot=int(item["numeric_slot"]) if item.get("numeric_slot") is not None else None,
+                footnote_marker=leading_footnote_marker(str(item.get("proof_text", item["text"]))),
+                runs=[
+                    InlineRun(
+                        text=str(run["text"]),
+                        kind=str(run["kind"]),
+                        bold=bool(run.get("bold", False)),
+                        italic=bool(run.get("italic", False)),
+                        underline=bool(run.get("underline", False)),
+                        hyperlink=bool(run.get("hyperlink", False)),
+                        source_index=int(run.get("source_index", 0)),
+                    )
+                    for run in item.get("runs", [])
+                ],
             )
         )
     return BrowserRenderResult(
-        blocks=blocks,
+        blocks=assign_structural_roles(blocks),
         width_px=width_px,
         height_px=height_px,
         rects_by_order=rects_by_order,
@@ -1879,7 +3908,7 @@ def extract_pdf_blocks_via_ocr(path: Path) -> BrowserRenderResult:
 
     document.close()
     return BrowserRenderResult(
-        blocks=blocks,
+        blocks=assign_structural_roles(blocks),
         width_px=max_width,
         height_px=max_height,
         rects_by_order=rects_by_order,
@@ -2034,7 +4063,7 @@ def extract_pdf_blocks(path: Path) -> BrowserRenderResult:
     if total_text_blocks == 0 or not blocks:
         return extract_pdf_blocks_via_ocr(path)
     return BrowserRenderResult(
-        blocks=blocks,
+        blocks=assign_structural_roles(blocks),
         width_px=max_width,
         height_px=max_height,
         rects_by_order=rects_by_order,
@@ -2105,11 +4134,14 @@ def get_approx_candidates(
     table_pos_map: dict[tuple[int, int, int], list[int]],
     table_index_map: dict[int, list[int]],
     used_html: set[int],
+    *,
+    table_pos_override: tuple[int, int, int] | None = None,
+    table_index_override: int | None = None,
 ) -> list[int]:
-    pos_key = table_pos_key(doc_block)
+    pos_key = table_pos_override if table_pos_override is not None else table_pos_key(doc_block)
     if pos_key is not None and pos_key in table_pos_map:
         return [index for index in table_pos_map[pos_key] if index not in used_html]
-    table_idx = table_index_key(doc_block)
+    table_idx = table_index_override if table_index_override is not None else table_index_key(doc_block)
     if table_idx is not None and table_idx in table_index_map:
         return [index for index in table_index_map[table_idx] if index not in used_html]
     candidates: set[int] = set()
@@ -2130,6 +4162,8 @@ def get_approx_candidates(
     doc_len = max(len(doc_block.normalized), 1)
     for index in candidates:
         if index in used_html:
+            continue
+        if not structural_role_compatible(doc_block, html_blocks[index]):
             continue
         html_len = max(len(html_blocks[index].normalized), 1)
         ratio = min(doc_len, html_len) / max(doc_len, html_len)
@@ -2206,6 +4240,18 @@ def match_embedded_pdf_blocks(
 
 
 def compare_blocks(docx_blocks: list[Block], html_blocks: list[Block]) -> tuple[list[Match], list[Block], list[Block]]:
+    doc_to_html_table_map, _html_to_doc_table_map = align_table_families(docx_blocks, html_blocks)
+    doc_header_ordinals, _doc_header_map = build_family_role_ordinals(docx_blocks)
+    _html_header_ordinals, html_header_map = build_family_role_ordinals(html_blocks)
+    doc_row_ordinals, _doc_row_map = build_row_label_ordinals(docx_blocks)
+    _html_row_ordinals, html_row_map = build_row_label_ordinals(html_blocks)
+    (
+        grouped_target_by_doc_index,
+        doc_block_to_group,
+        html_block_to_group,
+        doc_group_map,
+        html_group_map,
+    ) = match_block_groups(docx_blocks, html_blocks)
     (
         exact_map,
         token_index,
@@ -2216,22 +4262,125 @@ def compare_blocks(docx_blocks: list[Block], html_blocks: list[Block]) -> tuple[
         global_row_context_map,
         global_numeric_context_map,
     ) = build_html_indices(html_blocks)
-    used_html: set[int] = set()
-    matches: list[Match] = []
+    prematches, used_doc, used_html = prematch_same_cell_numeric_table_blocks(
+        docx_blocks,
+        html_blocks,
+        table_pos_map,
+        doc_to_html_table_map=doc_to_html_table_map,
+    )
+    for doc_index, target_group_id in grouped_target_by_doc_index.items():
+        if doc_index in used_doc:
+            continue
+        doc_group_id = doc_block_to_group.get(doc_index)
+        if doc_group_id is None:
+            continue
+        doc_group = doc_group_map.get(doc_group_id)
+        target_group = html_group_map.get(target_group_id)
+        if doc_group is None or target_group is None:
+            continue
+        if doc_group.group_type == "contact":
+            if not target_group.block_indices:
+                continue
+            html_index = target_group.block_indices[0]
+            if html_index in used_html:
+                continue
+            for group_doc_index in doc_group.block_indices:
+                payload = contact_field_payload(docx_blocks[group_doc_index].text)
+                if payload is None:
+                    score = 0.9
+                    match_type = "approx"
+                else:
+                    role, doc_value = payload
+                    target_value = extract_contact_fields(html_blocks[html_index].text).get(role)
+                    if target_value is None:
+                        score = 0.85
+                        match_type = "approx"
+                    else:
+                        score = max(
+                            similarity(normalize_for_compare(doc_value), normalize_for_compare(target_value)),
+                            0.82,
+                        )
+                        match_type = "exact_structural"
+                prematches.append(
+                    Match(
+                        docx_index=group_doc_index,
+                        html_index=html_index,
+                        match_type=match_type,
+                        score=score,
+                        formatting_diffs=summarize_formatting_diff(docx_blocks[group_doc_index], html_blocks[html_index]),
+                    )
+                )
+                used_doc.add(group_doc_index)
+            used_html.add(html_index)
+            continue
+        if doc_group.group_type not in {"footnote", "quote"}:
+            continue
+        if len(doc_group.block_indices) != 1 or len(target_group.block_indices) != 1:
+            continue
+        html_index = target_group.block_indices[0]
+        if html_index in used_html:
+            continue
+        score = group_similarity(doc_group, target_group)
+        if doc_group.group_type == "footnote" and score < 0.9:
+            continue
+        if doc_group.group_type == "quote" and score < 0.9:
+            continue
+        prematches.append(
+            Match(
+                docx_index=doc_index,
+                html_index=html_index,
+                match_type=promote_exact_structural_match(
+                    doc_index,
+                    html_index,
+                    docx_blocks,
+                    html_blocks,
+                    grouped_match_type=doc_group.group_type,
+                    score=score,
+                    match_type="approx",
+                ),
+                score=score,
+                formatting_diffs=summarize_formatting_diff(docx_blocks[doc_index], html_blocks[html_index]),
+            )
+        )
+        used_doc.add(doc_index)
+        used_html.add(html_index)
+    matches: list[Match] = list(prematches)
     unmatched_doc_indices: list[int] = []
 
     for doc_index, doc_block in enumerate(docx_blocks):
-        pos_key = table_pos_key(doc_block)
-        table_idx = table_index_key(doc_block)
-        row_key = row_context_key(doc_block)
+        if doc_index in used_doc:
+            continue
+        mapped_table_idx = mapped_table_index_key(doc_block, doc_to_html_table_map)
+        pos_key = mapped_table_pos_key(doc_block, doc_to_html_table_map)
+        table_idx = mapped_table_idx
+        row_key = mapped_row_context_key(doc_block, doc_to_html_table_map)
         global_row_key = global_row_context_key(doc_block)
         global_numeric_key = global_numeric_context_key(doc_block)
+        target_group_id = grouped_target_by_doc_index.get(doc_index)
+        doc_group = doc_group_map.get(doc_block_to_group.get(doc_index, ""))
+        doc_group_type = doc_group.group_type if doc_group is not None else None
+        family_filter = (
+            (lambda index: table_index_key(html_blocks[index]) == mapped_table_idx)
+            if mapped_table_idx is not None
+            else (lambda _index: True)
+        )
+        group_filter = (
+            (lambda index: html_block_to_group.get(index) == target_group_id)
+            if target_group_id is not None
+            else (lambda _index: True)
+        )
         pos_candidates: list[int] = []
         if pos_key is not None:
-            pos_candidates = [index for index in table_pos_map.get(pos_key, []) if index not in used_html]
-            exact_pos_index = next(
-                (index for index in pos_candidates if html_blocks[index].normalized == doc_block.normalized),
-                None,
+            pos_candidates = [
+                index
+                for index in table_pos_map.get(pos_key, [])
+                if index not in used_html and group_filter(index)
+            ]
+            exact_pos_index = select_best_exact_candidate(
+                doc_block,
+                [index for index in pos_candidates if html_blocks[index].normalized == doc_block.normalized],
+                html_blocks,
+                used_html,
             )
             if exact_pos_index is not None:
                 used_html.add(exact_pos_index)
@@ -2246,10 +4395,16 @@ def compare_blocks(docx_blocks: list[Block], html_blocks: list[Block]) -> tuple[
                 )
                 continue
         if global_numeric_key is not None:
-            numeric_candidates = [index for index in global_numeric_context_map.get(global_numeric_key, []) if index not in used_html]
-            exact_numeric_index = next(
-                (index for index in numeric_candidates if html_blocks[index].normalized == doc_block.normalized),
-                None,
+            numeric_candidates = [
+                index
+                for index in global_numeric_context_map.get(global_numeric_key, [])
+                if index not in used_html and family_filter(index) and group_filter(index)
+            ]
+            exact_numeric_index = select_best_exact_candidate(
+                doc_block,
+                [index for index in numeric_candidates if html_blocks[index].normalized == doc_block.normalized],
+                html_blocks,
+                used_html,
             )
             if exact_numeric_index is not None:
                 used_html.add(exact_numeric_index)
@@ -2275,17 +4430,31 @@ def compare_blocks(docx_blocks: list[Block], html_blocks: list[Block]) -> tuple[
                         Match(
                             docx_index=doc_index,
                             html_index=best_numeric_index,
-                            match_type="approx",
+                            match_type=promote_exact_structural_match(
+                                doc_index,
+                                best_numeric_index,
+                                docx_blocks,
+                                html_blocks,
+                                grouped_match_type=doc_group_type,
+                                score=best_numeric_score,
+                                match_type="approx",
+                            ),
                             score=best_numeric_score,
                             formatting_diffs=summarize_formatting_diff(doc_block, html_blocks[best_numeric_index]),
                         )
                     )
-                    continue
+                continue
         if row_key is not None:
-            row_candidates = [index for index in row_context_map.get(row_key, []) if index not in used_html]
-            exact_row_index = next(
-                (index for index in row_candidates if html_blocks[index].normalized == doc_block.normalized),
-                None,
+            row_candidates = [
+                index
+                for index in row_context_map.get(row_key, [])
+                if index not in used_html and group_filter(index)
+            ]
+            exact_row_index = select_best_exact_candidate(
+                doc_block,
+                [index for index in row_candidates if html_blocks[index].normalized == doc_block.normalized],
+                html_blocks,
+                used_html,
             )
             if exact_row_index is not None:
                 used_html.add(exact_row_index)
@@ -2311,17 +4480,31 @@ def compare_blocks(docx_blocks: list[Block], html_blocks: list[Block]) -> tuple[
                         Match(
                             docx_index=doc_index,
                             html_index=best_row_index,
-                            match_type="approx",
+                            match_type=promote_exact_structural_match(
+                                doc_index,
+                                best_row_index,
+                                docx_blocks,
+                                html_blocks,
+                                grouped_match_type=doc_group_type,
+                                score=best_row_score,
+                                match_type="approx",
+                            ),
                             score=best_row_score,
                             formatting_diffs=summarize_formatting_diff(doc_block, html_blocks[best_row_index]),
                         )
                     )
-                    continue
+                continue
         if global_row_key is not None:
-            global_row_candidates = [index for index in global_row_context_map.get(global_row_key, []) if index not in used_html]
-            exact_global_row_index = next(
-                (index for index in global_row_candidates if html_blocks[index].normalized == doc_block.normalized),
-                None,
+            global_row_candidates = [
+                index
+                for index in global_row_context_map.get(global_row_key, [])
+                if index not in used_html and family_filter(index) and group_filter(index)
+            ]
+            exact_global_row_index = select_best_exact_candidate(
+                doc_block,
+                [index for index in global_row_candidates if html_blocks[index].normalized == doc_block.normalized],
+                html_blocks,
+                used_html,
             )
             if exact_global_row_index is not None:
                 used_html.add(exact_global_row_index)
@@ -2347,7 +4530,15 @@ def compare_blocks(docx_blocks: list[Block], html_blocks: list[Block]) -> tuple[
                         Match(
                             docx_index=doc_index,
                             html_index=best_global_row_index,
-                            match_type="approx",
+                            match_type=promote_exact_structural_match(
+                                doc_index,
+                                best_global_row_index,
+                                docx_blocks,
+                                html_blocks,
+                                grouped_match_type=doc_group_type,
+                                score=best_global_row_score,
+                                match_type="approx",
+                            ),
                             score=best_global_row_score,
                             formatting_diffs=summarize_formatting_diff(doc_block, html_blocks[best_global_row_index]),
                         )
@@ -2359,6 +4550,8 @@ def compare_blocks(docx_blocks: list[Block], html_blocks: list[Block]) -> tuple[
                 for index, candidate in enumerate(html_blocks)
                 if index not in used_html
                 and candidate.table_cell
+                and family_filter(index)
+                and group_filter(index)
                 and candidate.row_key
                 and similarity(doc_block.row_key, candidate.row_key) >= 0.94
                 and (
@@ -2385,7 +4578,15 @@ def compare_blocks(docx_blocks: list[Block], html_blocks: list[Block]) -> tuple[
                         Match(
                             docx_index=doc_index,
                             html_index=best_fuzzy_row_index,
-                            match_type="approx",
+                            match_type=promote_exact_structural_match(
+                                doc_index,
+                                best_fuzzy_row_index,
+                                docx_blocks,
+                                html_blocks,
+                                grouped_match_type=doc_group_type,
+                                score=best_fuzzy_row_score,
+                                match_type="approx",
+                            ),
                             score=best_fuzzy_row_score,
                             formatting_diffs=summarize_formatting_diff(doc_block, html_blocks[best_fuzzy_row_index]),
                         )
@@ -2393,9 +4594,14 @@ def compare_blocks(docx_blocks: list[Block], html_blocks: list[Block]) -> tuple[
                     continue
         if table_idx is not None and not pos_candidates:
             exact_table_candidates = table_index_map.get(table_idx, [])
-            exact_table_index = next(
-                (index for index in exact_table_candidates if index not in used_html and html_blocks[index].normalized == doc_block.normalized),
-                None,
+            exact_table_index = select_best_exact_candidate(
+                doc_block,
+                [
+                    index for index in exact_table_candidates
+                    if html_blocks[index].normalized == doc_block.normalized and group_filter(index)
+                ],
+                html_blocks,
+                used_html,
             )
             if exact_table_index is not None:
                 used_html.add(exact_table_index)
@@ -2416,8 +4622,16 @@ def compare_blocks(docx_blocks: list[Block], html_blocks: list[Block]) -> tuple[
                 and len(doc_block.normalized) >= 12
             )
         )
-        exact_candidates = exact_map.get(doc_block.normalized, []) if allow_global_exact_for_table else []
-        exact_index = next((index for index in exact_candidates if index not in used_html), None)
+        exact_candidates = (
+            [
+                index
+                for index in exact_map.get(doc_block.normalized, [])
+                if family_filter(index) and group_filter(index)
+            ]
+            if allow_global_exact_for_table
+            else []
+        )
+        exact_index = select_best_exact_candidate(doc_block, exact_candidates, html_blocks, used_html)
         if exact_index is not None:
             used_html.add(exact_index)
             matches.append(
@@ -2433,7 +4647,19 @@ def compare_blocks(docx_blocks: list[Block], html_blocks: list[Block]) -> tuple[
 
         best_index = None
         best_score = 0.0
-        for html_index in get_approx_candidates(doc_block, html_blocks, token_index, length_buckets, table_pos_map, table_index_map, used_html):
+        for html_index in get_approx_candidates(
+            doc_block,
+            html_blocks,
+            token_index,
+            length_buckets,
+            table_pos_map,
+            table_index_map,
+            used_html,
+            table_pos_override=pos_key,
+            table_index_override=table_idx,
+        ):
+            if not group_filter(html_index):
+                continue
             score = similarity(doc_block.normalized, html_blocks[html_index].normalized)
             if score > best_score:
                 best_score = score
@@ -2444,13 +4670,106 @@ def compare_blocks(docx_blocks: list[Block], html_blocks: list[Block]) -> tuple[
                 Match(
                     docx_index=doc_index,
                     html_index=best_index,
-                    match_type="approx",
+                    match_type=promote_exact_structural_match(
+                        doc_index,
+                        best_index,
+                        docx_blocks,
+                        html_blocks,
+                        grouped_match_type=doc_group_type,
+                        score=best_score,
+                        match_type="approx",
+                    ),
                     score=best_score,
                     formatting_diffs=summarize_formatting_diff(doc_block, html_blocks[best_index]),
                 )
             )
         else:
             unmatched_doc_indices.append(doc_index)
+
+    recovered_doc_indices: set[int] = set()
+    recovered_html_indices: set[int] = set()
+
+    for doc_index in list(unmatched_doc_indices):
+        doc_block = docx_blocks[doc_index]
+        mapped_family_idx = mapped_table_index_key(doc_block, doc_to_html_table_map)
+        group = header_family_group(doc_block.structure_role)
+        if mapped_family_idx is None or group is None:
+            continue
+        ordinal = doc_header_ordinals.get(doc_index)
+        if ordinal is None:
+            continue
+        candidate_indices = [
+            index
+            for index in html_header_map.get((mapped_family_idx, group, ordinal), [])
+            if index not in used_html
+        ]
+        if len(candidate_indices) != 1:
+            continue
+        html_index = candidate_indices[0]
+        target_block = html_blocks[html_index]
+        score = max(
+            similarity(doc_block.normalized, target_block.normalized),
+            formatting_alignment_score(doc_block, target_block) / 10.0,
+        )
+        min_score = 0.6 if group == "title_family" else 0.72
+        if score < min_score:
+            continue
+        matches.append(
+            Match(
+                docx_index=doc_index,
+                html_index=html_index,
+                match_type="exact_structural",
+                score=score,
+                formatting_diffs=summarize_formatting_diff(doc_block, target_block),
+            )
+        )
+        recovered_doc_indices.add(doc_index)
+        recovered_html_indices.add(html_index)
+        used_html.add(html_index)
+
+    for doc_index in list(unmatched_doc_indices):
+        if doc_index in recovered_doc_indices:
+            continue
+        doc_block = docx_blocks[doc_index]
+        if doc_block.structure_role != "table_row_label":
+            continue
+        mapped_family_idx = mapped_table_index_key(doc_block, doc_to_html_table_map)
+        if mapped_family_idx is None:
+            continue
+        ordinal = doc_row_ordinals.get(doc_index)
+        if ordinal is None:
+            continue
+        candidate_indices = [
+            index
+            for index in html_row_map.get((mapped_family_idx, ordinal), [])
+            if index not in used_html
+        ]
+        if len(candidate_indices) != 1:
+            continue
+        html_index = candidate_indices[0]
+        target_block = html_blocks[html_index]
+        score = similarity(doc_block.normalized, target_block.normalized)
+        if score < 0.62 and not (
+            doc_block.row_key
+            and target_block.row_key
+            and similarity(doc_block.row_key, target_block.row_key) >= 0.62
+        ):
+            continue
+        matches.append(
+            Match(
+                docx_index=doc_index,
+                html_index=html_index,
+                match_type="exact_structural" if score >= 0.82 else "approx",
+                score=max(score, 0.82 if score >= 0.62 else score),
+                formatting_diffs=summarize_formatting_diff(doc_block, target_block),
+            )
+        )
+        recovered_doc_indices.add(doc_index)
+        recovered_html_indices.add(html_index)
+        used_html.add(html_index)
+
+    if recovered_doc_indices:
+        unmatched_doc_indices = [index for index in unmatched_doc_indices if index not in recovered_doc_indices]
 
     covered_html = set(used_html)
     embedded_matches, embedded_doc_indices, embedded_html_indices = match_embedded_pdf_blocks(
@@ -2499,7 +4818,7 @@ def difference_subject(doc_kind: str, html_kind: str) -> str:
 
 
 def date_phrase_for_token(text: str, token: DiffToken) -> str | None:
-    source = normalize_text(text)
+    source = normalize_proof_text(text)
     for match in DATE_PHRASE_RE.finditer(source):
         if token.start >= match.start() and token.end <= match.end():
             return match.group(0)
@@ -2639,6 +4958,36 @@ def currency_symbol_comment(
         contents=contents,
         token_index=0,
     )
+
+
+def percent_symbol_comment(
+    doc_block: Block,
+    target_block: Block,
+    *,
+    target_name: str,
+) -> HtmlComment | None:
+    doc_token = single_value_token(doc_block)
+    target_token = single_value_token(target_block)
+    if doc_token is None or target_token is None:
+        return None
+    if doc_token.kind != "number" or target_token.kind != "number":
+        return None
+    doc_value = parse_numeric_token(doc_token.text)
+    target_value = parse_numeric_token(target_token.text)
+    if doc_value is None or target_value is None:
+        return None
+    doc_number, doc_percent = doc_value
+    target_number, target_percent = target_value
+    if math.isclose(doc_number, target_number, rel_tol=1e-9, abs_tol=1e-9) and doc_percent != target_percent:
+        return HtmlComment(
+            order=target_block.order,
+            contents=(
+                f"The percent sign is different, {target_name} has {comment_token_text(target_token)} "
+                f"while word has {comment_token_text(doc_token)}."
+            ),
+            token_index=0,
+        )
+    return None
 
 
 def effective_currency_for_comment(
@@ -2798,8 +5147,82 @@ def token_with_prefix(token: DiffToken) -> str:
     return f"{prefix}{spaces}{token.text}" if prefix or spaces else token.text
 
 
+def whitespace_signature(text: str) -> tuple[int, int, int]:
+    source = normalize_proof_text(text)
+    return (source.count(" "), source.count("\t"), source.count("\n"))
+
+
+def describe_whitespace(text: str) -> str:
+    spaces, tabs, newlines = whitespace_signature(text)
+    parts: list[str] = []
+    if spaces:
+        parts.append(f"{spaces} space" + ("" if spaces == 1 else "s"))
+    if tabs:
+        parts.append(f"{tabs} tab" + ("" if tabs == 1 else "s"))
+    if newlines:
+        parts.append(f"{newlines} line break" + ("" if newlines == 1 else "s"))
+    return ", ".join(parts) if parts else "no space"
+
+
+def spacing_only_difference(doc_text: str, target_text: str) -> bool:
+    doc_tokens = diff_tokens(doc_text)
+    target_tokens = diff_tokens(target_text)
+    if len(doc_tokens) != len(target_tokens):
+        return False
+    if [token.normalized for token in doc_tokens] != [token.normalized for token in target_tokens]:
+        return False
+    if any(doc.spaces_before != target.spaces_before for doc, target in zip(doc_tokens, target_tokens)):
+        return True
+    for left_index in range(len(doc_tokens) - 1):
+        doc_sep = inter_token_separator(doc_text, doc_tokens[left_index], doc_tokens[left_index + 1])
+        target_sep = inter_token_separator(target_text, target_tokens[left_index], target_tokens[left_index + 1])
+        if normalized_separator_symbol(doc_sep) == normalized_separator_symbol(target_sep):
+            if whitespace_signature(doc_sep) != whitespace_signature(target_sep):
+                return True
+    return False
+
+
+def suppress_html_layout_spacing(
+    doc_block: Block,
+    target_block: Block,
+    *,
+    doc_token: DiffToken | None = None,
+    target_token: DiffToken | None = None,
+) -> bool:
+    if not (doc_block.table_cell and target_block.table_cell):
+        return False
+    if doc_token is not None and target_token is not None:
+        if doc_token.kind != target_token.kind:
+            return False
+        if doc_token.kind == "number":
+            return doc_token.normalized == target_token.normalized
+    return True
+
+
+def same_table_numeric_value_content(
+    doc_block: Block,
+    target_block: Block,
+    *,
+    docx_blocks: list[Block] | None = None,
+    target_blocks: list[Block] | None = None,
+) -> bool:
+    if not (doc_block.table_cell and target_block.table_cell):
+        return False
+    doc_token = single_value_token(doc_block)
+    target_token = single_value_token(target_block)
+    if doc_token is None or target_token is None:
+        return False
+    if doc_token.kind != "number" or target_token.kind != "number":
+        return False
+    if doc_token.normalized != target_token.normalized:
+        return False
+    doc_currency = effective_currency_for_comment(doc_block, doc_token, peer_blocks=docx_blocks)
+    target_currency = effective_currency_for_comment(target_block, target_token, peer_blocks=target_blocks)
+    return doc_currency == target_currency
+
+
 def inter_token_separator(text: str, left: DiffToken, right: DiffToken) -> str:
-    source = normalize_text(text)
+    source = normalize_proof_text(text)
     return source[left.end:right.start]
 
 
@@ -2810,6 +5233,8 @@ def normalized_separator_symbol(separator: str) -> str:
 
 def contextual_equal_token_comments(
     *,
+    doc_block: Block,
+    target_block: Block,
     order: int,
     target_name: str,
     doc_text: str,
@@ -2817,6 +5242,7 @@ def contextual_equal_token_comments(
     doc_tokens: list[DiffToken],
     target_tokens: list[DiffToken],
     target_offset: int = 0,
+    proofread_mode: bool = False,
 ) -> list[HtmlComment]:
     comments: list[HtmlComment] = []
     matcher = difflib.SequenceMatcher(
@@ -2855,8 +5281,15 @@ def contextual_equal_token_comments(
                 doc_token.kind == "number"
                 and doc_token.prefix_symbol == target_token.prefix_symbol
                 and doc_token.spaces_before != target_token.spaces_before
-                and max(doc_token.spaces_before, target_token.spaces_before) >= 2
+                and (proofread_mode or max(doc_token.spaces_before, target_token.spaces_before) >= 2)
             ):
+                if target_name == "html" and suppress_html_layout_spacing(
+                    doc_block,
+                    target_block,
+                    doc_token=doc_token,
+                    target_token=target_token,
+                ):
+                    continue
                 comments.append(
                     HtmlComment(
                         order=order,
@@ -2872,8 +5305,31 @@ def contextual_equal_token_comments(
             doc_right = doc_tokens[i1 + offset + 1]
             target_left = target_tokens[j1 + offset]
             target_right = target_tokens[j1 + offset + 1]
-            doc_sep = normalized_separator_symbol(inter_token_separator(doc_text, doc_left, doc_right))
-            target_sep = normalized_separator_symbol(inter_token_separator(target_text, target_left, target_right))
+            if (
+                target_right.prefix_symbol is not None
+                and target_right.prefix_symbol in "$€£¥"
+                and doc_right.prefix_symbol == target_right.prefix_symbol
+            ):
+                continue
+            doc_sep_raw = inter_token_separator(doc_text, doc_left, doc_right)
+            target_sep_raw = inter_token_separator(target_text, target_left, target_right)
+            if proofread_mode and whitespace_signature(doc_sep_raw) != whitespace_signature(target_sep_raw):
+                if normalized_separator_symbol(doc_sep_raw) == normalized_separator_symbol(target_sep_raw):
+                    if target_name == "html" and suppress_html_layout_spacing(doc_block, target_block):
+                        continue
+                    comments.append(
+                        HtmlComment(
+                            order=order,
+                            contents=(
+                                f"The spacing is different, {target_name} has {describe_whitespace(target_sep_raw)} "
+                                f"between {target_left.text} and {target_right.text} while word has {describe_whitespace(doc_sep_raw)}."
+                            ),
+                            token_index=target_offset + j1 + offset + 1,
+                        )
+                    )
+                    continue
+            doc_sep = normalized_separator_symbol(doc_sep_raw)
+            target_sep = normalized_separator_symbol(target_sep_raw)
             if doc_sep == target_sep:
                 continue
             if not doc_sep and not target_sep:
@@ -2914,6 +5370,7 @@ def single_token_target_comments(
     target_block: Block,
     *,
     target_name: str,
+    proofread_mode: bool = False,
 ) -> list[HtmlComment] | None:
     doc_tokens = diff_tokens(doc_block.text)
     if len(doc_tokens) != 1:
@@ -2946,7 +5403,7 @@ def single_token_target_comments(
         doc_currency = bool(doc_token.prefix_symbol) and doc_token.prefix_symbol in "$€£¥"
         target_currency = bool(target_token.prefix_symbol) and target_token.prefix_symbol in "$€£¥"
         if doc_token.prefix_symbol != target_token.prefix_symbol and (doc_currency or target_currency):
-            if target_name == "pdf" and not target_currency:
+            if target_name == "pdf" and not target_currency and not proofread_mode:
                 return []
             return [
                 HtmlComment(
@@ -2962,8 +5419,15 @@ def single_token_target_comments(
             doc_token.kind == "number"
             and doc_token.prefix_symbol == target_token.prefix_symbol
             and doc_token.spaces_before != target_token.spaces_before
-            and max(doc_token.spaces_before, target_token.spaces_before) >= 2
+            and (proofread_mode or max(doc_token.spaces_before, target_token.spaces_before) >= 2)
         ):
+            if target_name == "html" and suppress_html_layout_spacing(
+                doc_block,
+                target_block,
+                doc_token=doc_token,
+                target_token=target_token,
+            ):
+                return []
             return [
                 HtmlComment(
                     order=target_block.order,
@@ -2991,6 +5455,59 @@ def single_token_target_comments(
     ]
 
 
+def contact_field_difference_comments(
+    doc_block: Block,
+    target_block: Block,
+    score: float,
+    *,
+    target_name: str,
+    proofread_mode: bool,
+    match_type: str,
+) -> list[HtmlComment]:
+    payload = contact_field_payload(doc_block.text)
+    if payload is None:
+        return []
+    role, doc_value = payload
+    target_value = extract_contact_fields(target_block.text).get(role)
+    if not target_value:
+        return []
+    if normalize_proof_text(doc_value) == normalize_proof_text(target_value):
+        return []
+    doc_field_block = Block(
+        id=f"{doc_block.id}-contact-field",
+        source=doc_block.source,
+        order=doc_block.order,
+        text=doc_value,
+        normalized=normalize_for_compare(doc_value),
+        raw_text=doc_value,
+        proof_text=doc_value,
+        match_text=normalize_for_compare(doc_value),
+        kind=doc_block.kind,
+        structure_role=role,
+    )
+    target_field_block = Block(
+        id=f"{target_block.id}-contact-field-{role}",
+        source=target_block.source,
+        order=target_block.order,
+        text=target_value,
+        normalized=normalize_for_compare(target_value),
+        raw_text=target_value,
+        proof_text=target_value,
+        match_text=normalize_for_compare(target_value),
+        kind=target_block.kind,
+        structure_role=role,
+    )
+    return text_difference_comments(
+        doc_field_block,
+        target_field_block,
+        max(score, similarity(doc_field_block.normalized, target_field_block.normalized)),
+        target_name=target_name,
+        match_type="exact_structural" if exact_like_match_type(match_type) else "approx",
+        proofread_mode=proofread_mode,
+        grouped_match_type=None,
+    )
+
+
 def text_difference_comments(
     doc_block: Block,
     target_block: Block,
@@ -3000,7 +5517,43 @@ def text_difference_comments(
     docx_blocks: list[Block] | None = None,
     target_blocks: list[Block] | None = None,
     match_type: str = "approx",
+    formatting_diffs: list[str] | None = None,
+    proofread_mode: bool = False,
+    grouped_match_type: str | None = None,
 ) -> list[HtmlComment]:
+    if grouped_match_type == "contact":
+        return contact_field_difference_comments(
+            doc_block,
+            target_block,
+            score,
+            target_name=target_name,
+            proofread_mode=proofread_mode,
+            match_type=match_type,
+        )
+    confidence_tier = match_confidence_tier(
+        doc_block,
+        target_block,
+        score=score,
+        match_type=match_type,
+        grouped_match_type=grouped_match_type,
+        target_name=target_name,
+    )
+    narrative_like = target_name == "html" and long_narrative_block(doc_block) and long_narrative_block(target_block)
+    formatting_allowed = not (
+        proofread_mode
+        and target_name == "html"
+        and formatting_diffs
+        and not exact_like_match_type(match_type)
+        and score < 0.92
+    ) and confidence_tier == "strong"
+    formatting_comments = [
+        HtmlComment(
+            order=target_block.order,
+            contents=f"Formatting differs: {diff}",
+            token_index=0 if diff_tokens(target_block.text) else None,
+        )
+        for diff in (formatting_diffs or [])
+    ] if proofread_mode and formatting_diffs and formatting_allowed else []
     contained_like = match_type == "contained" or (
         target_name == "pdf"
         and not doc_block.table_cell
@@ -3016,6 +5569,13 @@ def text_difference_comments(
     )
     if currency_comment is not None:
         return [currency_comment]
+    percent_comment = percent_symbol_comment(
+        doc_block,
+        target_block,
+        target_name=target_name,
+    )
+    if percent_comment is not None:
+        return [percent_comment]
     numeric_comment = numeric_block_difference_comment(
         doc_block,
         target_block,
@@ -3029,21 +5589,36 @@ def text_difference_comments(
         doc_block,
         target_block,
         target_name=target_name,
+        proofread_mode=proofread_mode,
     )
     if single_token_comments is not None:
         return single_token_comments
-    if target_name == "pdf" and normalize_without_footnote_refs(doc_block.text) == normalize_without_footnote_refs(target_block.text):
+    if target_name == "pdf" and pdf_blocks_equal_after_cleanup(doc_block, target_block):
+        if not spacing_only_difference(doc_block.text, target_block.text):
+            return formatting_comments
+    if not (proofread_mode and target_name == "html"):
+        doc_match_text = normalize_for_compare(strip_leading_markers(doc_block.text))
+        target_match_text = normalize_for_compare(strip_leading_markers(target_block.text))
+        if doc_match_text == target_match_text:
+            if normalize_proof_text(doc_block.text) == normalize_proof_text(target_block.text):
+                return formatting_comments
+    pdf_score_floor = 0.82 if proofread_mode else 0.9
+    if target_name == "pdf" and not contained_like and not doc_block.table_cell and not target_block.table_cell and score < pdf_score_floor:
         return []
-    if (
-        target_name == "pdf"
-        and not doc_block.table_cell
-        and not target_block.table_cell
-        and normalize_pdf_paragraph_artifacts(doc_block.text) == normalize_pdf_paragraph_artifacts(target_block.text)
-    ):
+    if confidence_tier == "weak":
         return []
-    if normalize_for_compare(strip_leading_markers(doc_block.text)) == normalize_for_compare(strip_leading_markers(target_block.text)):
-        return []
-    if target_name == "pdf" and not contained_like and not doc_block.table_cell and not target_block.table_cell and score < 0.9:
+    if grouped_match_type == "quote" and not exact_like_match_type(match_type):
+        if score < 0.88:
+            return []
+        if score < 0.96 or narrative_like:
+            return [
+                HtmlComment(
+                    order=target_block.order,
+                    contents=quote_diff_summary(doc_block.text, target_block.text, target_name=target_name),
+                    token_index=0 if diff_tokens(target_block.text) else None,
+                )
+            ]
+    if narrative_like and not exact_like_match_type(match_type) and score < 0.88:
         return []
 
     doc_tokens = diff_tokens(doc_block.text)
@@ -3057,6 +5632,8 @@ def text_difference_comments(
             return []
 
     contextual_comments = contextual_equal_token_comments(
+        doc_block=doc_block,
+        target_block=target_block,
         order=target_block.order,
         target_name=target_name,
         doc_text=doc_block.text,
@@ -3064,9 +5641,10 @@ def text_difference_comments(
         doc_tokens=doc_tokens,
         target_tokens=target_tokens,
         target_offset=target_offset,
+        proofread_mode=proofread_mode,
     )
     if doc_block.normalized == target_block.normalized or score >= 0.999:
-        return contextual_comments
+        return contextual_comments or formatting_comments
 
     comments: list[HtmlComment] = []
     matcher = difflib.SequenceMatcher(
@@ -3120,6 +5698,57 @@ def text_difference_comments(
     comments = dedupe_html_comments(comments)
 
     if comments:
+        if grouped_match_type == "quote":
+            return [
+                HtmlComment(
+                    order=target_block.order,
+                    contents=quote_diff_summary(doc_block.text, target_block.text, target_name=target_name),
+                    token_index=0 if target_tokens else None,
+                )
+            ]
+        if confidence_tier == "medium":
+            return [
+                HtmlComment(
+                    order=target_block.order,
+                    contents=(
+                        "The paragraph text is different. "
+                        f"{target_name.upper()}: {shorten(target_block.text, 160)} "
+                        f"Word: {shorten(doc_block.text, 160)}"
+                    ),
+                    token_index=0 if target_tokens else None,
+                )
+            ]
+        if (
+            grouped_match_type == "footnote"
+            and (
+                len(comments) > 4
+                or len(doc_block.text) > 140
+                or len(target_block.text) > 140
+            )
+        ):
+            return [
+                HtmlComment(
+                    order=target_block.order,
+                    contents=(
+                        "The footnote text is different. "
+                        f"{target_name.upper()}: {shorten(target_block.text, 140)} "
+                        f"Word: {shorten(doc_block.text, 140)}"
+                    ),
+                    token_index=0 if target_tokens else None,
+                )
+            ]
+        if target_name == "html" and narrative_like and not exact_like_match_type(match_type):
+            return [
+                HtmlComment(
+                    order=target_block.order,
+                    contents=(
+                        "The paragraph text is different. "
+                        f"{target_name.upper()}: {shorten(target_block.text, 160)} "
+                        f"Word: {shorten(doc_block.text, 160)}"
+                    ),
+                    token_index=0 if target_tokens else None,
+                )
+            ]
         if target_name == "pdf" and contained_like and not doc_block.table_cell and not target_block.table_cell:
             focused_comments = [
                 comment
@@ -3129,6 +5758,8 @@ def text_difference_comments(
                     or "currency symbol is different" in comment.contents
                     or comment.contents.startswith("The date ")
                     or comment.contents.startswith("The number ")
+                    or (proofread_mode and comment.contents.startswith("The word "))
+                    or (proofread_mode and comment.contents.startswith("The symbol "))
                 )
             ]
             if focused_comments:
@@ -3154,7 +5785,7 @@ def text_difference_comments(
             and token_subsequence_ratio(doc_block.normalized, target_block.normalized) >= 0.99
         ):
             return []
-        if target_name == "pdf" and not doc_block.table_cell and not target_block.table_cell and len(comments) > 4:
+        if target_name == "pdf" and not doc_block.table_cell and not target_block.table_cell and len(comments) > (8 if proofread_mode else 4):
             return [
                 HtmlComment(
                     order=target_block.order,
@@ -3167,6 +5798,9 @@ def text_difference_comments(
                 )
             ]
         return comments
+
+    if formatting_comments:
+        return formatting_comments
 
     if target_name == "html" and prnewswire_only_difference(doc_block.text, target_block.text):
         pr_tokens = diff_tokens(target_block.text)
@@ -3182,8 +5816,35 @@ def text_difference_comments(
     if target_name == "pdf" and normalize_without_punctuation(doc_block.text) == normalize_without_punctuation(target_block.text):
         return []
 
+    if (
+        target_name == "html"
+        and doc_block.table_cell
+        and target_block.table_cell
+        and suppress_html_layout_spacing(doc_block, target_block)
+        and same_table_numeric_value_content(
+            doc_block,
+            target_block,
+            docx_blocks=docx_blocks,
+            target_blocks=target_blocks,
+        )
+    ):
+        return formatting_comments
+
     if target_name == "pdf" and contained_like:
         return []
+
+    if grouped_match_type == "footnote":
+        return [
+            HtmlComment(
+                order=target_block.order,
+                contents=(
+                    "The footnote text is different. "
+                    f"{target_name.upper()}: {shorten(target_block.text, 140)} "
+                    f"Word: {shorten(doc_block.text, 140)}"
+                ),
+                token_index=0 if target_tokens else None,
+            )
+        ]
 
     return [
         HtmlComment(
@@ -3250,6 +5911,110 @@ def appendix_summary_blocks(docx_blocks: list[Block], unmatched_docx: list[Block
     return summary_blocks
 
 
+def build_section_family_appendix_comments(
+    docx_blocks: list[Block],
+    target_blocks: list[Block],
+    unmatched_docx: list[Block],
+    *,
+    target_label: str,
+) -> tuple[list[tuple[Block, str]], set[str]]:
+    (
+        section_matches,
+        doc_block_to_family,
+        _target_block_to_family,
+        doc_family_map,
+        target_family_map,
+    ) = match_section_families(docx_blocks, target_blocks)
+    unmatched_ids = {block.id for block in unmatched_docx}
+    doc_index_by_id = {block.id: index for index, block in enumerate(docx_blocks)}
+    comments: list[tuple[Block, str]] = []
+    covered_block_ids: set[str] = set()
+    seen_family_ids: set[str] = set()
+
+    for block in unmatched_docx:
+        doc_index = doc_index_by_id.get(block.id)
+        if doc_index is None:
+            continue
+        family_id = doc_block_to_family.get(doc_index)
+        if family_id is None or family_id in seen_family_ids:
+            continue
+        family = doc_family_map.get(family_id)
+        if family is None:
+            continue
+        family_block_ids = {docx_blocks[index].id for index in family.block_indices}
+        if not (family_block_ids & unmatched_ids):
+            continue
+        seen_family_ids.add(family_id)
+        covered_block_ids.update(family_block_ids & unmatched_ids)
+        representative = docx_blocks[family.block_indices[0]]
+        matched_target_id = section_matches.get(family_id)
+        if matched_target_id is not None:
+            continue
+        comments.append(
+            (
+                representative,
+                (
+                    f"This DOCX {family.family_type} section was not found in the {target_label}. "
+                    f"Word: {shorten(family.text, 180)}"
+                ),
+            )
+        )
+    return comments, covered_block_ids
+
+
+def build_section_family_inline_comments(
+    docx_blocks: list[Block],
+    target_blocks: list[Block],
+    unmatched_docx: list[Block],
+    *,
+    target_label: str,
+) -> tuple[list[HtmlComment], set[str]]:
+    (
+        section_matches,
+        doc_block_to_family,
+        _target_block_to_family,
+        doc_family_map,
+        target_family_map,
+    ) = match_section_families(docx_blocks, target_blocks)
+    unmatched_ids = {block.id for block in unmatched_docx}
+    doc_index_by_id = {block.id: index for index, block in enumerate(docx_blocks)}
+    comments: list[HtmlComment] = []
+    covered_block_ids: set[str] = set()
+    seen_family_ids: set[str] = set()
+
+    for block in unmatched_docx:
+        doc_index = doc_index_by_id.get(block.id)
+        if doc_index is None:
+            continue
+        family_id = doc_block_to_family.get(doc_index)
+        if family_id is None or family_id in seen_family_ids:
+            continue
+        matched_target_id = section_matches.get(family_id)
+        if matched_target_id is None:
+            continue
+        family = doc_family_map.get(family_id)
+        target_family = target_family_map.get(matched_target_id)
+        if family is None or target_family is None:
+            continue
+        family_block_ids = {docx_blocks[index].id for index in family.block_indices}
+        if not (family_block_ids & unmatched_ids):
+            continue
+        seen_family_ids.add(family_id)
+        covered_block_ids.update(family_block_ids & unmatched_ids)
+        comments.append(
+            HtmlComment(
+                order=target_family.order_start,
+                contents=(
+                    f"This DOCX {family.family_type} section is broadly matched to the {target_label} but not aligned block-by-block. "
+                    f"{target_label}: {shorten(target_family.text, 180)} "
+                    f"Word: {shorten(family.text, 180)}"
+                ),
+                token_index=None,
+            )
+        )
+    return comments, covered_block_ids
+
+
 def build_comments(
     docx_blocks: list[Block],
     html_blocks: list[Block],
@@ -3258,12 +6023,52 @@ def build_comments(
     unmatched_html: list[Block],
     *,
     target_label: str = "HTML",
+    proofread_mode: bool = False,
 ) -> tuple[list[HtmlComment], list[tuple[Block, str]]]:
     html_comments: list[HtmlComment] = []
     target_name = target_label.lower()
+    (
+        grouped_target_by_doc_index,
+        doc_block_to_group,
+        target_block_to_group,
+        doc_group_map,
+        target_group_map,
+    ) = match_block_groups(docx_blocks, html_blocks)
+    doc_index_by_id = {block.id: index for index, block in enumerate(docx_blocks)}
+    target_index_by_id = {block.id: index for index, block in enumerate(html_blocks)}
+    family_inline_comments, family_inline_docx_ids = build_section_family_inline_comments(
+        docx_blocks,
+        html_blocks,
+        unmatched_docx,
+        target_label=target_label,
+    )
+    family_appendix_comments, family_covered_docx_ids = build_section_family_appendix_comments(
+        docx_blocks,
+        html_blocks,
+        unmatched_docx,
+        target_label=target_label,
+    )
+    family_covered_docx_ids |= family_inline_docx_ids
+
+    def grouped_match_type(doc_index: int, target_index: int) -> str | None:
+        doc_group_id = doc_block_to_group.get(doc_index)
+        target_group_id = target_block_to_group.get(target_index)
+        if doc_group_id is None or target_group_id is None:
+            return None
+        if grouped_target_by_doc_index.get(doc_index) != target_group_id:
+            return None
+        doc_group = doc_group_map.get(doc_group_id)
+        target_group = target_group_map.get(target_group_id)
+        if doc_group is None or target_group is None:
+            return None
+        if doc_group.group_type != target_group.group_type:
+            return None
+        return doc_group.group_type
+
     for match in matches:
         doc_block = docx_blocks[match.docx_index]
         html_block = html_blocks[match.html_index]
+        matched_group_type = grouped_match_type(match.docx_index, match.html_index)
         html_comments.extend(
             text_difference_comments(
                 doc_block,
@@ -3273,10 +6078,22 @@ def build_comments(
                 docx_blocks=docx_blocks,
                 target_blocks=html_blocks,
                 match_type=match.match_type,
+                formatting_diffs=match.formatting_diffs,
+                proofread_mode=proofread_mode,
+                grouped_match_type=matched_group_type,
             )
         )
 
+    html_comments.extend(family_inline_comments)
+
     def unmatched_html_fallback_comments(block: Block) -> list[HtmlComment]:
+        target_group_id = target_block_to_group.get(target_index_by_id.get(block.id, -1))
+        if target_group_id is not None:
+            target_group = target_group_map.get(target_group_id)
+            if target_group is not None and target_group.group_type in {"quote", "contact", "footnote"}:
+                return []
+        if repeated_label_block(block) and matching_block_exists(block, docx_blocks):
+            return []
         best_doc_block: Block | None = None
         best_score = 0.0
         candidates = unmatched_docx if unmatched_docx else docx_blocks
@@ -3292,13 +6109,23 @@ def build_comments(
 
         if best_doc_block is None:
             return []
+        if repeated_label_block(block) and repeated_label_block(best_doc_block) and best_score < 0.94:
+            return []
 
         overlap = token_overlap_ratio(best_doc_block.normalized, block.normalized)
         strong_near_match = (
-            best_score >= 0.78
+            best_score >= (0.86 if proofread_mode and target_label == "HTML" else 0.78)
+            or (
+                block.table_cell
+                and best_doc_block.table_cell
+                and best_score >= (0.74 if proofread_mode and target_label == "HTML" else 0.68)
+                and overlap >= (0.62 if proofread_mode and target_label == "HTML" else 0.55)
+                and len(diff_tokens(best_doc_block.text)) <= 6
+                and len(diff_tokens(block.text)) <= 6
+            )
             or (
                 overlap >= 0.5
-                and best_score >= 0.58
+                and best_score >= (0.7 if proofread_mode and target_label == "HTML" else 0.58)
                 and len(diff_tokens(best_doc_block.text)) <= 6
                 and len(diff_tokens(block.text)) <= 6
             )
@@ -3313,9 +6140,19 @@ def build_comments(
             docx_blocks=docx_blocks,
             target_blocks=html_blocks,
             match_type="approx",
+            proofread_mode=proofread_mode,
         )
 
     def unmatched_docx_fallback_comments(block: Block) -> list[HtmlComment]:
+        if block.id in family_covered_docx_ids:
+            return []
+        doc_group_id = doc_block_to_group.get(doc_index_by_id.get(block.id, -1))
+        if doc_group_id is not None:
+            doc_group = doc_group_map.get(doc_group_id)
+            if doc_group is not None and doc_group.group_type in {"quote", "contact", "footnote"}:
+                return []
+        if repeated_label_block(block) and matching_block_exists(block, html_blocks):
+            return []
         best_target_block: Block | None = None
         best_score = 0.0
         target_candidates = unmatched_html if unmatched_html else html_blocks
@@ -3344,19 +6181,42 @@ def build_comments(
 
         if best_target_block is None:
             return []
+        if repeated_label_block(block) and repeated_label_block(best_target_block) and best_score < 0.94:
+            return []
 
         overlap = token_overlap_ratio(block.normalized, best_target_block.normalized)
         strong_near_match = (
-            best_score >= 0.8
+            best_score >= (
+                0.86 if proofread_mode and target_label == "HTML"
+                else 0.74 if proofread_mode and target_label == "PDF"
+                else 0.8
+            )
             or (
                 block.table_cell
-                and best_score >= 0.58
+                and best_score >= (
+                    0.74 if proofread_mode and target_label == "HTML"
+                    else 0.52 if proofread_mode and target_label == "PDF"
+                    else 0.58
+                )
+                and overlap >= (0.62 if proofread_mode and target_label == "HTML" else 0.0)
                 and len(diff_tokens(block.text)) <= 6
             )
             or (
-                overlap >= 0.5
-                and best_score >= 0.6
-                and len(diff_tokens(block.text)) <= 8
+                overlap >= (
+                    0.62 if proofread_mode and target_label == "HTML"
+                    else 0.42 if proofread_mode and target_label == "PDF"
+                    else 0.5
+                )
+                and best_score >= (
+                    0.72 if proofread_mode and target_label == "HTML"
+                    else 0.54 if proofread_mode and target_label == "PDF"
+                    else 0.6
+                )
+                and len(diff_tokens(block.text)) <= (
+                    10 if proofread_mode and target_label == "HTML"
+                    else 12 if proofread_mode and target_label == "PDF"
+                    else 8
+                )
             )
         )
         if not strong_near_match:
@@ -3371,6 +6231,7 @@ def build_comments(
             docx_blocks=docx_blocks,
             target_blocks=html_blocks,
             match_type=match_type,
+            proofread_mode=proofread_mode,
         )
 
     for block in unmatched_html:
@@ -3380,6 +6241,8 @@ def build_comments(
         if fallback_comments:
             html_comments.extend(fallback_comments)
             continue
+        if repeated_label_block(block) and matching_block_exists(block, docx_blocks):
+            continue
         html_comments.append(
             HtmlComment(
                 order=block.order,
@@ -3388,10 +6251,22 @@ def build_comments(
             )
         )
 
-    appendix_comments = [
-        (block, f"This DOCX content was not found in the {target_label}.")
-        for block in appendix_summary_blocks(docx_blocks, unmatched_docx)
-    ]
+    remaining_unmatched_docx = [block for block in unmatched_docx if block.id not in family_covered_docx_ids]
+    appendix_comments = list(family_appendix_comments)
+    if family_appendix_comments:
+        appendix_comments.extend(
+            [
+                (block, f"This DOCX content was not found in the {target_label}.")
+                for block in remaining_unmatched_docx
+            ]
+        )
+    else:
+        appendix_comments.extend(
+            [
+                (block, f"This DOCX content was not found in the {target_label}.")
+                for block in appendix_summary_blocks(docx_blocks, remaining_unmatched_docx)
+            ]
+        )
     if target_label == "PDF":
         for block in unmatched_docx:
             html_comments.extend(unmatched_docx_fallback_comments(block))
@@ -3402,8 +6277,79 @@ def build_comments(
 def group_html_comments(html_comments: list[HtmlComment]) -> dict[int, list[str]]:
     grouped: dict[int, list[str]] = {}
     for comment in html_comments:
-        grouped.setdefault(comment.order, []).append(comment.contents)
+        grouped.setdefault(comment.order, []).append(format_review_comment_text(comment.contents))
     return grouped
+
+
+def review_metadata(contents: str) -> tuple[str, str]:
+    lower = normalize_for_compare(contents)
+    if "broadly matched" in lower or "section is broadly matched" in lower:
+        return "medium", "structural"
+    if "no corresponding content" in lower or "was not found in the html" in lower or "was not found in the pdf" in lower:
+        return "medium", "structural"
+    if lower.startswith("formatting differs"):
+        return "medium", "formatting"
+    if lower.startswith("the footnote text is different") or lower.startswith("the paragraph text is different"):
+        return "medium", "text"
+    if (
+        lower.startswith("the word is different")
+        or lower.startswith("the number is different")
+        or lower.startswith("the date is different")
+        or lower.startswith("the currency symbol is different")
+        or lower.startswith("the percent sign is different")
+        or lower.startswith("the symbol is different")
+        or lower.startswith("the spacing is different")
+        or lower.startswith("the word is extra")
+        or lower.startswith("the word is missing")
+        or lower.startswith("the number is extra")
+        or lower.startswith("the number is missing")
+    ):
+        return "high", "critical"
+    return "medium", "informational"
+
+
+def review_label(confidence: str, tier: str) -> str:
+    tier_labels = {
+        "critical": "Critical",
+        "text": "Text",
+        "formatting": "Formatting",
+        "structural": "Structural",
+        "informational": "Info",
+    }
+    return f"[{confidence.title()} Confidence | {tier_labels.get(tier, tier.title())}]"
+
+
+def format_review_comment_text(contents: str) -> str:
+    confidence, tier = review_metadata(contents)
+    return f"{review_label(confidence, tier)} {contents}"
+
+
+def review_summary_counts(comment_texts: list[str]) -> dict[tuple[str, str], int]:
+    counts: dict[tuple[str, str], int] = {}
+    for text in comment_texts:
+        key = review_metadata(text)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def review_summary_lines(html_comments: list[HtmlComment], appendix_comments: list[tuple[Block, str]]) -> list[str]:
+    counts = review_summary_counts(
+        [comment.contents for comment in html_comments] + [comment for _block, comment in appendix_comments]
+    )
+    ordered_keys = [
+        ("high", "critical"),
+        ("medium", "text"),
+        ("medium", "formatting"),
+        ("medium", "structural"),
+        ("medium", "informational"),
+    ]
+    lines: list[str] = []
+    for key in ordered_keys:
+        count = counts.get(key, 0)
+        if not count:
+            continue
+        lines.append(f"{review_label(*key)}: {count}")
+    return lines
 
 
 def pdf_page_summary_comments(
@@ -3434,13 +6380,12 @@ def pdf_page_summary_comments(
     comments: list[HtmlComment] = []
     for page_number, blocks in sorted(unmatched_by_page.items()):
         meaningful_blocks = [block for block in blocks if visible_meaningful(block.text) and not is_pdf_chrome_text(block.text)]
-        if len(meaningful_blocks) < 3:
-            continue
-        top_blocks = meaningful_blocks[:3]
-        if any(pdf_block_has_docx_anchor(block, docx_blocks) for block in top_blocks):
-            continue
         matched_count = matched_pages.get(page_number, 0)
-        if matched_count > 0 and not (matched_count <= 1 and len(meaningful_blocks) >= 6):
+        if not should_emit_pdf_page_summary_comment(
+            meaningful_blocks=meaningful_blocks,
+            matched_count=matched_count,
+            docx_blocks=docx_blocks,
+        ):
             continue
         anchor_block = meaningful_blocks[0]
         comments.append(
@@ -3451,6 +6396,22 @@ def pdf_page_summary_comments(
             )
         )
     return comments
+
+
+def should_emit_pdf_page_summary_comment(
+    *,
+    meaningful_blocks: list[Block],
+    matched_count: int,
+    docx_blocks: list[Block],
+) -> bool:
+    if len(meaningful_blocks) < 3:
+        return False
+    top_blocks = meaningful_blocks[:3]
+    if any(pdf_block_has_docx_anchor(block, docx_blocks) for block in top_blocks):
+        return False
+    if matched_count > 0 and not (matched_count <= 1 and len(meaningful_blocks) >= 6):
+        return False
+    return True
 
 
 def pdf_safe_text(text: str) -> str:
@@ -3690,7 +6651,7 @@ def annotate_existing_pdf(
             max(22, y_top_pt),
         )
         annotation = Text(
-            text=comment.contents,
+            text=format_review_comment_text(comment.contents),
             rect=note_rect,
             open=False,
         )
@@ -3713,7 +6674,8 @@ def annotate_existing_pdf(
     if appendix_comments:
         first_page = writer.pages[0]
         first_page_height_pt = float(first_page.mediabox.top) - float(first_page.mediabox.bottom)
-        lines = [f"- {shorten(block.text, 160)}" for block, _comment in appendix_comments[:20]]
+        review_lines = review_summary_lines(html_comments, appendix_comments)
+        lines = review_lines + [f"- {shorten(block.text, 160)}" for block, _comment in appendix_comments[:20]]
         if len(appendix_comments) > 20:
             lines.append(f"- ... and {len(appendix_comments) - 20} more DOCX-only blocks")
         summary_text = (
@@ -3757,6 +6719,12 @@ def render_pdf(
         font_size=10,
         gap_after=14,
     )
+    summary_lines = review_summary_lines(html_comments, appendix_comments)
+    if summary_lines:
+        pdf.add_wrapped_text("Proofread Summary", font_size=12, gap_after=6)
+        for line in summary_lines:
+            pdf.add_wrapped_text(line, font_size=10, indent=12, gap_after=0)
+        pdf.current_y -= 10
 
     for block in html_blocks:
         tag_bits = []
@@ -3787,7 +6755,7 @@ def render_pdf(
             gap_after=14,
         )
         for index, (block, comment) in enumerate(appendix_comments, start=1):
-            pdf.add_block(f"[DOCX only {index}]", block.text, comment)
+            pdf.add_block(f"[DOCX only {index}]", block.text, format_review_comment_text(comment))
 
     output_path.write_bytes(pdf.build())
 
@@ -3799,7 +6767,7 @@ def build_summary(
     unmatched_docx: list[Block],
     unmatched_html: list[Block],
 ) -> dict[str, object]:
-    exact = sum(1 for match in matches if match.match_type == "exact")
+    exact = sum(1 for match in matches if exact_like_match_type(match.match_type))
     approx = sum(1 for match in matches if match.match_type == "approx")
     return {
         "docx_blocks": len(docx_blocks),
@@ -3868,6 +6836,11 @@ def parse_args() -> argparse.Namespace:
         default="auto",
         help="PDF rendering mode. Use `playwright` for browser-faithful rendering on Windows/macOS/Linux.",
     )
+    parser.add_argument(
+        "--proofread",
+        action="store_true",
+        help="Use the stricter proofread profile for compare mode.",
+    )
     return parser.parse_args()
 
 
@@ -3878,6 +6851,7 @@ def run_compare(
     output_path: Path | None = None,
     summary_json_path: Path | None = None,
     renderer: str = "auto",
+    proofread_mode: bool = False,
 ) -> dict[str, object]:
     output_path = output_path or Path(default_output_name(html_path))
     docx_blocks = extract_docx_blocks(docx_path)
@@ -3900,6 +6874,7 @@ def run_compare(
         unmatched_docx,
         unmatched_html,
         target_label="HTML",
+        proofread_mode=proofread_mode,
     )
 
     if use_playwright:
@@ -3924,6 +6899,8 @@ def run_compare(
     summary = build_summary(docx_blocks, html_blocks, matches, unmatched_docx, unmatched_html)
     summary["renderer"] = "playwright" if use_playwright else "simple"
     summary["target_kind"] = "html"
+    summary["compare_profile"] = "proofread" if proofread_mode else "standard"
+    summary["formatting_scope"] = "token, symbol, spacing, and structural formatting checks against extracted HTML blocks"
     summary["output_pdf"] = str(output_path)
     if summary_json_path:
         summary_json_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
@@ -3937,6 +6914,7 @@ def run_compare_pdf(
     pdf_path: Path,
     output_path: Path | None = None,
     summary_json_path: Path | None = None,
+    proofread_mode: bool = False,
 ) -> dict[str, object]:
     output_path = output_path or Path(default_pdf_output_name(pdf_path))
     docx_blocks = extract_docx_blocks(docx_path)
@@ -3951,6 +6929,7 @@ def run_compare_pdf(
         unmatched_docx,
         unmatched_pdf,
         target_label="PDF",
+        proofread_mode=proofread_mode,
     )
     pdf_comments.extend(
         pdf_page_summary_comments(
@@ -3973,6 +6952,8 @@ def run_compare_pdf(
     summary = build_summary(docx_blocks, pdf_blocks, matches, unmatched_docx, unmatched_pdf)
     summary["renderer"] = "pdf"
     summary["target_kind"] = "pdf"
+    summary["compare_profile"] = "proofread" if proofread_mode else "standard"
+    summary["formatting_scope"] = "token, symbol, spacing, and limited structural checks; full visual formatting is not guaranteed for PDFs"
     summary["output_pdf"] = str(output_path)
     if summary_json_path:
         summary_json_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
@@ -3990,6 +6971,7 @@ def main() -> int:
             pdf_path=args.pdf,
             output_path=args.output,
             summary_json_path=args.summary_json,
+            proofread_mode=args.proofread,
         )
     else:
         summary = run_compare(
@@ -3998,6 +6980,7 @@ def main() -> int:
             output_path=args.output,
             summary_json_path=args.summary_json,
             renderer=args.renderer,
+            proofread_mode=args.proofread,
         )
 
     print(f"PDF written: {summary['output_pdf']}")

@@ -66,6 +66,7 @@ class CompareHandler(BaseHTTPRequestHandler):
             payload = json.loads(body.decode("utf-8"))
 
             mode = str(payload.get("mode", "html")).strip().lower() or "html"
+            proofread = bool(payload.get("proofread", False))
             if mode not in {"html", "pdf"}:
                 self._send_json({"error": "Unsupported compare mode."}, status=HTTPStatus.BAD_REQUEST)
                 return
@@ -101,6 +102,7 @@ class CompareHandler(BaseHTTPRequestHandler):
                     pdf_path=target_path,
                     output_path=output_path,
                     summary_json_path=summary_path,
+                    proofread_mode=proofread,
                 )
             else:
                 summary = run_compare(
@@ -109,12 +111,14 @@ class CompareHandler(BaseHTTPRequestHandler):
                     output_path=output_path,
                     summary_json_path=summary_path,
                     renderer="playwright",
+                    proofread_mode=proofread,
                 )
 
             self._send_json(
                 {
                     "ok": True,
                     "mode": mode,
+                    "proofread": proofread,
                     "run_id": run_id,
                     "summary": summary,
                     "output_name": output_name,
