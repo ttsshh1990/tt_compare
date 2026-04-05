@@ -999,10 +999,7 @@ class CompareHelperTests(unittest.TestCase):
             target_blocks=[pdf],
             match_type="approx",
         )
-        self.assertEqual(
-            [comment.contents for comment in comments],
-            ["The spacing is different, pdf has $0.34 while word has $    0.34."],
-        )
+        self.assertEqual(comments, [])
 
     def test_date_difference_comment_uses_full_dates(self) -> None:
         doc = g.Block(
@@ -1437,14 +1434,114 @@ class CompareHelperTests(unittest.TestCase):
             ["The percent sign is different, html has (2.1)% while word has (2.1)."],
         )
 
+    def test_match_confidence_tier_pdf_promotes_short_header_family_match(self) -> None:
+        doc = g.Block(
+            id="d",
+            source="docx",
+            order=1,
+            text="Financial Targetss",
+            normalized=g.normalize_for_compare("Financial Targetss"),
+            structure_role="table_subtitle",
+        )
+        pdf = g.Block(
+            id="p",
+            source="pdf",
+            order=1,
+            text="Financial Targets",
+            normalized=g.normalize_for_compare("Financial Targets"),
+            structure_role="table_title",
+        )
+        self.assertEqual(
+            g.match_confidence_tier(
+                doc,
+                pdf,
+                score=0.56,
+                match_type="exact_structural",
+                grouped_match_type=None,
+                target_name="pdf",
+            ),
+            "strong",
+        )
+
+    def test_text_difference_comments_pdf_long_narrative_uses_summary_for_medium_match(self) -> None:
+        doc = g.Block(
+            id="d",
+            source="docx",
+            order=10,
+            text=(
+                "Forward-Looking Statements\n"
+                "This press release contains forward-looking statements, including expected growth, "
+                "customer demand, business strategies, and operating execution for the fiscal year."
+            ),
+            normalized=g.normalize_for_compare(
+                "Forward-Looking Statements This press release contains forward-looking statements, including expected growth, customer demand, business strategies, and operating execution for the fiscal year."
+            ),
+            structure_role="paragraph",
+        )
+        pdf = g.Block(
+            id="p",
+            source="pdf",
+            order=10,
+            text=(
+                "Forward-Looking Statements\n"
+                "This press release contains forward-looking statements, including expected growth, "
+                "customer demand, business strategies, operating execution, and capital allocation for the fiscal year."
+            ),
+            normalized=g.normalize_for_compare(
+                "Forward-Looking Statements This press release contains forward-looking statements, including expected growth, customer demand, business strategies, operating execution, and capital allocation for the fiscal year."
+            ),
+            structure_role="paragraph",
+        )
+        comments = g.text_difference_comments(
+            doc,
+            pdf,
+            0.84,
+            target_name="pdf",
+            proofread_mode=True,
+            match_type="approx",
+        )
+        self.assertEqual(len(comments), 1)
+        self.assertTrue(comments[0].contents.startswith("The paragraph text is different. PDF:"))
+
+    def test_compare_blocks_pdf_proofread_matches_quote_family_more_tolerantly(self) -> None:
+        doc = g.Block(
+            id="doc-quote",
+            source="docx",
+            order=1,
+            text='"Synopsys enters 2026 with an expanded portfolio and strong momentum," said Sassine Ghazi, president and CEO of Synopsys.',
+            normalized=g.normalize_for_compare(
+                '"Synopsys enters 2026 with an expanded portfolio and strong momentum," said Sassine Ghazi, president and CEO of Synopsys.'
+            ),
+            structure_role="paragraph",
+        )
+        pdf = g.Block(
+            id="pdf-quote",
+            source="pdf",
+            order=1,
+            text='“Synopsys enters 2026 with an expanded portfolio and strong momentum,” said Sassine Ghazi, president and CEO of Synopsys',
+            normalized=g.normalize_for_compare(
+                '“Synopsys enters 2026 with an expanded portfolio and strong momentum,” said Sassine Ghazi, president and CEO of Synopsys'
+            ),
+            structure_role="paragraph",
+        )
+        matches, docx_only, pdf_only = g.compare_blocks([doc], [pdf], target_name="pdf", proofread_mode=True)
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(docx_only, [])
+        self.assertEqual(pdf_only, [])
+
 
 class Q1PdfRegressionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.docx_blocks = g.extract_docx_blocks(Q1_DOCX)
-        cls.render_result = g.extract_pdf_blocks(Q1_PDF)
+        cls.render_result = g.extract_pdf_blocks(Q1_PDF, proofread_mode=True)
         cls.pdf_blocks = cls.render_result.blocks
-        cls.matches, cls.unmatched_docx, cls.unmatched_pdf = g.compare_blocks(cls.docx_blocks, cls.pdf_blocks)
+        cls.matches, cls.unmatched_docx, cls.unmatched_pdf = g.compare_blocks(
+            cls.docx_blocks,
+            cls.pdf_blocks,
+            target_name="pdf",
+            proofread_mode=True,
+        )
 
     def _find_doc_block(self, predicate) -> g.Block:
         return next(block for block in self.docx_blocks if predicate(block))
@@ -1518,14 +1615,75 @@ class Q1PdfRegressionTests(unittest.TestCase):
         )
         self.assertEqual(comments, [])
 
+    def test_same_value_pdf_table_spacing_is_suppressed(self) -> None:
+        doc = CompareHelperTests._table_block(
+            "$ 14.38",
+            source="docx",
+            row_key="target non-gaap earnings per diluted share attributable to synopsys",
+            row_slot=1,
+            numeric_slot=0,
+            table_pos=(1, 5, 1),
+        )
+        pdf = CompareHelperTests._table_block(
+            "$14.38",
+            source="pdf",
+            row_key="target non-gaap earnings per diluted share attributable to synopsys",
+            row_slot=1,
+            numeric_slot=0,
+            table_pos=(1, 5, 1),
+        )
+        comments = g.text_difference_comments(
+            doc,
+            pdf,
+            1.0,
+            target_name="pdf",
+            docx_blocks=[doc],
+            target_blocks=[pdf],
+            proofread_mode=True,
+        )
+        self.assertEqual(comments, [])
+
+    def test_pdf_embedded_lead_body_does_not_emit_formatting_noise(self) -> None:
+        doc = g.Block(
+            id="doc-call-body",
+            source="docx",
+            order=1,
+            text="Synopsys will hold a conference call for financial analysts and investors today at 2:00 p.m. Pacific Time.",
+            normalized=g.normalize_for_compare("Synopsys will hold a conference call for financial analysts and investors today at 2:00 p.m. Pacific Time."),
+        )
+        pdf = g.Block(
+            id="pdf-call-block",
+            source="pdf",
+            order=1,
+            text="Earnings Call Open to Investors\nSynopsys will hold a conference call for financial analysts and investors today at 2:00 p.m. Pacific Time.",
+            normalized=g.normalize_for_compare("Earnings Call Open to Investors Synopsys will hold a conference call for financial analysts and investors today at 2:00 p.m. Pacific Time."),
+            bold=True,
+            underline=True,
+        )
+        comments = g.text_difference_comments(
+            doc,
+            pdf,
+            0.96,
+            target_name="pdf",
+            formatting_diffs=['DOCX does not have bold on "Call"; HTML has it.'],
+            proofread_mode=True,
+            match_type="approx",
+        )
+        self.assertEqual(comments, [])
+
 
 class Q3PdfRegressionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.docx_blocks = g.extract_docx_blocks(Q3_DOCX)
-        cls.render_result = g.extract_pdf_blocks(Q3_PDF)
+        cls.render_result = g.extract_pdf_blocks(Q3_PDF, proofread_mode=True)
         cls.pdf_blocks = cls.render_result.blocks
-        cls.matches, cls.unmatched_docx, cls.unmatched_pdf = g.compare_blocks(cls.docx_blocks, cls.pdf_blocks)
+        cls.matches, cls.unmatched_docx, cls.unmatched_pdf = g.compare_blocks(
+            cls.docx_blocks,
+            cls.pdf_blocks,
+            target_name="pdf",
+            proofread_mode=True,
+        )
 
     def test_page_summary_comments_are_suppressed_when_docx_has_anchor_sections(self) -> None:
         comments = g.pdf_page_summary_comments(
@@ -1534,6 +1692,7 @@ class Q3PdfRegressionTests(unittest.TestCase):
             unmatched_pdf=self.unmatched_pdf,
             matches=self.matches,
             render_result=self.render_result,
+            proofread_mode=True,
         )
         self.assertEqual(comments, [])
 
@@ -1550,6 +1709,44 @@ class Q3PdfRegressionTests(unittest.TestCase):
             match_type="approx",
         )
         self.assertEqual(comments, [])
+
+    def test_pdf_page_header_is_not_labeled_as_table_header(self) -> None:
+        pdf_header = next(block for block in self.pdf_blocks if block.text == "SYNOPSYS, INC.")
+        self.assertFalse(pdf_header.table_cell)
+        self.assertEqual(pdf_header.structure_role, "paragraph")
+
+    def test_pdf_contact_block_does_not_absorb_release_headline(self) -> None:
+        contact_block = next(block for block in self.pdf_blocks if "INVESTOR CONTACT" in block.text)
+        self.assertNotIn("Synopsys Posts Financial Results", contact_block.text)
+
+    def test_pdf_narrative_artifact_word_is_suppressed(self) -> None:
+        doc = next(block for block in self.docx_blocks if block.text.startswith("The targets included in this press release"))
+        pdf = next(block for block in self.pdf_blocks if block.order == 111)
+        match = next(match for match in self.matches if self.pdf_blocks[match.html_index].order == 111)
+        comments = g.text_difference_comments(
+            doc,
+            pdf,
+            match.score,
+            target_name="pdf",
+            docx_blocks=self.docx_blocks,
+            target_blocks=self.pdf_blocks,
+            match_type=match.match_type,
+            proofread_mode=True,
+        )
+        self.assertEqual(comments, [])
+
+    def test_q3_pdf_comments_do_not_start_with_header_to_title_false_positive(self) -> None:
+        comments, _appendix = g.build_comments(
+            self.docx_blocks,
+            self.pdf_blocks,
+            self.matches,
+            self.unmatched_docx,
+            self.unmatched_pdf,
+            target_label="PDF",
+            proofread_mode=True,
+        )
+        bad = [comment.contents for comment in comments if "SYNOPSYS in pdf while Fourth in word" in comment.contents]
+        self.assertEqual(bad, [])
 
 
 if __name__ == "__main__":

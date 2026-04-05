@@ -664,7 +664,7 @@ def align_table_families(
     docx_blocks: list[Block],
     target_blocks: list[Block],
 ) -> tuple[dict[int, int], dict[int, int]]:
-    if not target_blocks or target_blocks[0].source != "html":
+    if not target_blocks or target_blocks[0].source not in {"html", "pdf"}:
         return {}, {}
 
     doc_families = extract_table_families(docx_blocks)
@@ -728,7 +728,11 @@ def contact_label_key(text: str) -> str | None:
 def looks_like_contact_fragment(block: Block) -> bool:
     if block.table_cell or block.heading:
         return False
-    text = normalize_text(block.text).strip()
+    return looks_like_contact_text(block.text)
+
+
+def looks_like_contact_text(text: str) -> bool:
+    text = normalize_text(text).strip()
     normalized = normalize_for_compare(text)
     if not text:
         return False
@@ -889,6 +893,68 @@ def quote_diff_summary(doc_text: str, target_text: str, *, target_name: str) -> 
     )
 
 
+def extract_primary_quote_text(text: str) -> str | None:
+    source = normalize_text(text)
+    starts = [idx for idx, char in enumerate(source) if char in {'"', "“"}]
+    ends = [idx for idx, char in enumerate(source) if char in {'"', "”"}]
+    if not starts or not ends:
+        return None
+    start = starts[0]
+    end = ends[-1]
+    if end <= start:
+        return None
+    extracted = source[start : end + 1].strip()
+    return extracted if len(extracted) >= 40 else None
+
+
+def pdf_embedded_lead_body(block: Block) -> str | None:
+    if block.source != "pdf" or block.table_cell:
+        return None
+    source = normalize_text(block.text)
+    if "\n" not in source:
+        return None
+    first_line, remainder = source.split("\n", 1)
+    first_line = first_line.strip()
+    remainder = remainder.strip()
+    if not first_line or not remainder:
+        return None
+    if len(diff_tokens(first_line)) > 8 or len(first_line) > 90:
+        return None
+    if len(diff_tokens(remainder)) < 12:
+        return None
+    if block.runs:
+        first_line_chars = len(first_line)
+        consumed = 0
+        first_line_has_text = False
+        for run in block.runs:
+            if run.kind == "linebreak":
+                break
+            if run.kind != "space":
+                first_line_has_text = True
+                if not run.bold:
+                    return None
+            consumed += len(run.text)
+            if consumed >= first_line_chars:
+                break
+        if not first_line_has_text:
+            return None
+    return remainder
+
+
+def spacing_is_only_pdf_line_wrap(doc_sep: str, target_sep: str) -> bool:
+    doc_spaces, _doc_tabs, doc_lines = whitespace_signature(doc_sep)
+    target_spaces, _target_tabs, target_lines = whitespace_signature(target_sep)
+    if normalized_separator_symbol(doc_sep) != normalized_separator_symbol(target_sep):
+        return False
+    if doc_lines == target_lines:
+        return False
+    if doc_lines == 0 and target_lines > 0 and doc_spaces >= 1:
+        return True
+    if target_lines == 0 and doc_lines > 0 and target_spaces >= 1:
+        return True
+    return False
+
+
 def long_narrative_block(block: Block) -> bool:
     return (
         not block.table_cell
@@ -996,12 +1062,15 @@ def match_confidence_tier(
     grouped_match_type: str | None,
     target_name: str,
 ) -> str:
+    proofread_target = target_name in {"html", "pdf"}
     if doc_block.structure_role == "section_lead" and target_block.structure_role == "section_lead":
         if exact_like_match_type(match_type):
             return "strong"
-        if score >= 0.8:
+        lead_strong = 0.8 if target_name == "html" else 0.76 if target_name == "pdf" else 0.8
+        lead_medium = 0.7 if target_name == "html" else 0.66 if target_name == "pdf" else 0.7
+        if score >= lead_strong:
             return "strong"
-        if score >= 0.7:
+        if score >= lead_medium:
             return "medium"
         return "weak"
     if (
@@ -1014,9 +1083,9 @@ def match_confidence_tier(
         if (
             exact_like_match_type(match_type)
             and compatible_header_family_roles(doc_block.structure_role, target_block.structure_role)
-            and target_name == "html"
+            and proofread_target
             and max(len(doc_block.normalized), len(target_block.normalized)) <= 32
-            and similarity(doc_block.normalized, target_block.normalized) >= 0.6
+            and similarity(doc_block.normalized, target_block.normalized) >= (0.6 if target_name == "html" else 0.52)
         ):
             return "strong"
         if score >= 0.96 and exact_like_match_type(match_type):
@@ -1028,17 +1097,19 @@ def match_confidence_tier(
             and target_block.structure_role.startswith("contact_")
         ):
             return "strong"
-        if repeated_label_block(doc_block) and repeated_label_block(target_block) and target_name == "html":
+        if repeated_label_block(doc_block) and repeated_label_block(target_block) and proofread_target:
             return "medium"
         return "strong"
     if grouped_match_type in {"quote", "footnote", "contact"}:
-        if score >= 0.95:
+        group_strong = 0.95 if target_name == "html" else 0.9 if target_name == "pdf" else 0.95
+        group_medium = 0.88 if target_name == "html" else 0.8 if target_name == "pdf" else 0.88
+        if score >= group_strong:
             return "strong"
-        if score >= 0.88:
+        if score >= group_medium:
             return "medium"
         return "weak"
     if (
-        target_name == "html"
+        proofread_target
         and (
             repeated_label_block(doc_block)
             or repeated_label_block(target_block)
@@ -1046,32 +1117,42 @@ def match_confidence_tier(
             or len(target_block.normalized) <= 24
         )
     ):
-        if score >= 0.98 and doc_block.normalized == target_block.normalized:
+        short_strong = 0.98 if target_name == "html" else 0.94 if target_name == "pdf" else 0.98
+        short_medium = 0.9 if target_name == "html" else 0.82 if target_name == "pdf" else 0.9
+        if score >= short_strong and doc_block.normalized == target_block.normalized:
             return "strong"
-        if score >= 0.9:
+        if score >= short_medium:
             return "medium"
         return "weak"
     if doc_block.table_cell and target_block.table_cell:
-        if score >= 0.9:
+        table_strong = 0.9 if target_name != "pdf" else 0.84
+        table_medium = 0.8 if target_name != "pdf" else 0.72
+        if score >= table_strong:
             return "strong"
-        if score >= 0.8:
+        if score >= table_medium:
             return "medium"
         return "weak"
     if repeated_label_block(doc_block) and repeated_label_block(target_block):
-        if score >= 0.985:
+        repeated_strong = 0.985 if target_name != "pdf" else 0.95
+        repeated_medium = 0.94 if target_name != "pdf" else 0.86
+        if score >= repeated_strong:
             return "strong"
-        if score >= 0.94:
+        if score >= repeated_medium:
             return "medium"
         return "weak"
     if long_narrative_block(doc_block) and long_narrative_block(target_block):
-        if score >= 0.96:
+        narrative_strong = 0.96 if target_name != "pdf" else 0.92
+        narrative_medium = 0.88 if target_name != "pdf" else 0.8
+        if score >= narrative_strong:
             return "strong"
-        if score >= 0.88:
+        if score >= narrative_medium:
             return "medium"
         return "weak"
-    if score >= 0.95:
+    default_strong = 0.95 if target_name != "pdf" else 0.9
+    default_medium = 0.84 if target_name != "pdf" else 0.76
+    if score >= default_strong:
         return "strong"
-    if score >= 0.84:
+    if score >= default_medium:
         return "medium"
     return "weak"
 
@@ -1703,8 +1784,203 @@ def normalize_without_footnote_refs(text: str) -> str:
 def normalize_pdf_paragraph_artifacts(text: str) -> str:
     cleaned = normalize_text(text)
     cleaned = re.sub(r"([A-Za-z])-\s*\n\s*([A-Za-z])", r"\1-\2", cleaned)
+    lines: list[str] = []
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if re.fullmatch(r"\d{1,2}", line):
+            continue
+        if likely_pdf_noise_line(line):
+            continue
+        lines.append(line)
+    cleaned = "\n".join(lines)
     cleaned = re.sub(r"(?:\n\s*)+\d{1,2}\s*$", "", cleaned)
+    cleaned = re.sub(r"\b[A-Z][a-z]{4,}(and|or|the|to|of|for|with|from|by)\b", r"\1", cleaned)
+    cleaned = re.sub(r"\s*\n\s*", " ", cleaned)
     return normalize_for_compare(cleaned)
+
+
+def likely_pdf_noise_line(text: str) -> bool:
+    line = normalize_text(text).strip()
+    if not line:
+        return False
+    if re.fullmatch(r"\[?[A-Z0-9]{2,}(?:\s+[A-Z0-9]{1,4}){1,6}\]?", line):
+        return True
+    if headerish_table_text(line):
+        return False
+    alpha_chars = [char for char in line if char.isalpha()]
+    if not alpha_chars:
+        return False
+    upper_ratio = sum(1 for char in alpha_chars if char.isupper()) / len(alpha_chars)
+    token_count = len(diff_tokens(line))
+    if token_count <= 4 and len(line) <= 28 and upper_ratio >= 0.75 and not re.search(r"[.:;!?]", line):
+        return True
+    return False
+
+
+def looks_like_pdf_section_line(text: str, next_line: str | None) -> bool:
+    line = normalize_text(text).strip()
+    if not visible_meaningful(line):
+        return False
+    if next_line is None or len(diff_tokens(next_line)) < 8:
+        return False
+    if len(line) > 90:
+        return False
+    token_count = len(diff_tokens(line))
+    if token_count < 2 or token_count > 10:
+        return False
+    if headerish_table_text(line) or line.endswith((".", ";", ",")):
+        return False
+    words = re.findall(r"[A-Za-z][A-Za-z'’-]*", line)
+    if not words:
+        return False
+    titled = sum(1 for word in words if word[:1].isupper())
+    lowered = sum(1 for word in words if word.islower())
+    if titled / len(words) < 0.7:
+        return False
+    if lowered / len(words) > 0.35:
+        return False
+    return True
+
+
+def pdf_narrative_segments(block: Block) -> list[str]:
+    if block.source != "pdf" or block.table_cell:
+        return [normalize_text(block.text).strip()]
+    lines = [normalize_text(line).strip() for line in normalize_text(block.text).splitlines() if visible_meaningful(line)]
+    if len(lines) < 2:
+        return [normalize_text(block.text).strip()]
+
+    segments: list[str] = []
+    start = 0
+    first_next = lines[1] if len(lines) > 1 else None
+    if looks_like_pdf_section_line(lines[0], first_next):
+        segments.append(lines[0])
+        start = 1
+
+    current: list[str] = []
+    for index in range(start, len(lines)):
+        line = lines[index]
+        next_line = lines[index + 1] if index + 1 < len(lines) else None
+        if current and looks_like_pdf_section_line(line, next_line):
+            segment = "\n".join(current).strip()
+            if segment:
+                segments.append(segment)
+            current = [line]
+            continue
+        current.append(line)
+
+    if current:
+        segment = "\n".join(current).strip()
+        if segment:
+            segments.append(segment)
+
+    return segments or [normalize_text(block.text).strip()]
+
+
+def best_pdf_narrative_focus(doc_block: Block, target_block: Block) -> str | None:
+    if target_block.source != "pdf" or target_block.table_cell:
+        return None
+    segments = pdf_narrative_segments(target_block)
+    if len(segments) <= 1:
+        return None
+    doc_norm = normalize_for_compare(doc_block.text)
+    full_norm = normalize_for_compare(target_block.text)
+    full_score = similarity(doc_norm, full_norm)
+    best_segment: str | None = None
+    best_score = full_score
+    for segment in segments:
+        segment_norm = normalize_for_compare(segment)
+        score = similarity(doc_norm, segment_norm)
+        if score > best_score:
+            best_score = score
+            best_segment = segment
+    if best_segment is None:
+        return None
+    if best_score >= 0.9 or best_score - full_score >= 0.05:
+        return best_segment
+    return None
+
+
+def pdf_span_format(flags: int, font_name: str) -> tuple[bool, bool, bool]:
+    font_lower = (font_name or "").lower()
+    bold = bool(flags & 16) or "bold" in font_lower or "black" in font_lower or "semibold" in font_lower
+    italic = bool(flags & 2) or "italic" in font_lower or "oblique" in font_lower
+    underline = "underline" in font_lower
+    return bold, italic, underline
+
+
+def build_pdf_span_entries(page: Any) -> list[dict[str, Any]]:
+    span_entries: list[dict[str, Any]] = []
+    page_dict = page.get_text("dict")
+    for block in page_dict.get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                text = normalize_text(str(span.get("text", "")))
+                if not text:
+                    continue
+                bbox = span.get("bbox")
+                if not bbox or len(bbox) < 4:
+                    continue
+                bold, italic, underline = pdf_span_format(int(span.get("flags", 0) or 0), str(span.get("font", "")))
+                span_entries.append(
+                    {
+                        "rect": (float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])),
+                        "text": text,
+                        "bold": bold,
+                        "italic": italic,
+                        "underline": underline,
+                    }
+                )
+    return span_entries
+
+
+def collect_pdf_runs_for_rect(
+    rect: tuple[float, float, float, float],
+    span_entries: list[dict[str, Any]] | None,
+) -> list[InlineRun]:
+    if not span_entries:
+        return []
+    x0, y0, x1, y1 = rect
+    matched: list[dict[str, Any]] = []
+    for span in span_entries:
+        span_rect = span["rect"]
+        if overlap_area(rect, span_rect) > 0 or rect_contains_point(rect, (span_rect[0] + span_rect[2]) / 2, (span_rect[1] + span_rect[3]) / 2):
+            matched.append(span)
+    if not matched:
+        return []
+    matched.sort(key=lambda item: (round(item["rect"][1], 1), round(item["rect"][0], 1)))
+    runs: list[InlineRun] = []
+    prev_rect: tuple[float, float, float, float] | None = None
+    for span_index, span in enumerate(matched):
+        span_rect = span["rect"]
+        if prev_rect is not None:
+            prev_h = max(1.0, prev_rect[3] - prev_rect[1])
+            curr_h = max(1.0, span_rect[3] - span_rect[1])
+            if abs(span_rect[1] - prev_rect[1]) > max(prev_h, curr_h) * 0.8:
+                if not runs or runs[-1].text != "\n":
+                    runs.append(InlineRun(text="\n", kind="linebreak", source_index=span_index))
+            elif span_rect[0] - prev_rect[2] > 0.8:
+                if not runs or runs[-1].kind != "space":
+                    runs.append(InlineRun(text=" ", kind="space", source_index=span_index))
+        for chunk in re.findall(r"\s+|[^\s]+", span["text"]):
+            normalized_chunk = normalize_text(chunk)
+            if not normalized_chunk:
+                continue
+            runs.append(
+                InlineRun(
+                    text=normalized_chunk,
+                    kind=classify_inline_run(normalized_chunk),
+                    bold=bool(span["bold"]),
+                    italic=bool(span["italic"]),
+                    underline=bool(span["underline"]),
+                    source_index=span_index,
+                )
+            )
+        prev_rect = span_rect
+    return runs
 
 
 def detect_dash_like_gap(
@@ -1791,6 +2067,154 @@ def join_words_for_pdf_cluster(
         parts.append(separator + str(word["text"]).strip())
         prev = word
     return "".join(parts).strip()
+
+
+def cluster_signature_x_positions(clusters: list[list[dict[str, Any]]]) -> list[float]:
+    positions: list[float] = []
+    for cluster in clusters:
+        if not cluster:
+            continue
+        x0 = min(item["rect"][0] for item in cluster)
+        positions.append(round(x0, 1))
+    return positions
+
+
+def compatible_pdf_column_signature(left: list[float], right: list[float]) -> bool:
+    if not left or not right:
+        return False
+    if abs(len(left) - len(right)) > 1:
+        return False
+    compare_count = min(len(left), len(right), 4)
+    if compare_count == 0:
+        return False
+    matches = 0
+    for idx in range(compare_count):
+        if abs(left[idx] - right[idx]) <= 24.0:
+            matches += 1
+    return matches >= max(1, compare_count - 1)
+
+
+def build_pdf_row_infos(
+    row_groups: list[list[dict[str, Any]]],
+    *,
+    page_width: float,
+    page_height: float,
+    pixmap: Any | None = None,
+) -> list[dict[str, Any]]:
+    row_infos: list[dict[str, Any]] = []
+    for row_index, row_words in enumerate(row_groups):
+        row_words = sorted(row_words, key=lambda word: word["rect"][0])
+        avg_height = sum(word["rect"][3] - word["rect"][1] for word in row_words) / max(len(row_words), 1)
+        cluster_gap = max(22.0, avg_height * 2.6)
+        clusters: list[list[dict[str, Any]]] = []
+        for word in row_words:
+            if not clusters:
+                clusters.append([word])
+                continue
+            prev_word = clusters[-1][-1]
+            gap = word["rect"][0] - prev_word["rect"][2]
+            if gap > cluster_gap:
+                clusters.append([word])
+            else:
+                clusters[-1].append(word)
+        meaningful_clusters = [cluster for cluster in clusters if visible_meaningful(" ".join(item["text"] for item in cluster))]
+        cluster_texts = [
+            join_words_for_pdf_cluster(
+                cluster,
+                page_width=page_width,
+                page_height=page_height,
+                pixmap=pixmap,
+            )
+            for cluster in meaningful_clusters
+        ]
+        numeric_count = 0
+        currency_count = 0
+        headerish_count = 0
+        for text in cluster_texts:
+            temp_block = Block(
+                id="",
+                source="pdf",
+                order=0,
+                text=text,
+                normalized=normalize_for_compare(text),
+            )
+            token = single_value_token(temp_block)
+            if token is not None and token.kind == "number":
+                numeric_count += 1
+            if extract_currency_symbol(text):
+                currency_count += 1
+            if headerish_table_text(text):
+                headerish_count += 1
+        row_infos.append(
+            {
+                "row_index": row_index,
+                "clusters": meaningful_clusters,
+                "cluster_texts": cluster_texts,
+                "x_positions": cluster_signature_x_positions(meaningful_clusters),
+                "numeric_count": numeric_count,
+                "currency_count": currency_count,
+                "headerish_count": headerish_count,
+            }
+        )
+    return row_infos
+
+
+def detect_pdf_table_regions(row_infos: list[dict[str, Any]]) -> dict[int, tuple[int, int]]:
+    if not row_infos:
+        return {}
+    candidate_rows: set[int] = set()
+    for info in row_infos:
+        cluster_count = len(info["clusters"])
+        if cluster_count < 2:
+            continue
+        if info["numeric_count"] >= 1 or info["currency_count"] >= 1 or info["headerish_count"] >= 1:
+            candidate_rows.add(info["row_index"])
+
+    expanded_candidates = set(candidate_rows)
+    for info in row_infos:
+        row_index = info["row_index"]
+        if row_index in candidate_rows:
+            continue
+        if len(info["clusters"]) != 1 or info["headerish_count"] == 0:
+            continue
+        prev_candidate = row_index - 1 in candidate_rows
+        next_candidate = row_index + 1 in candidate_rows
+        if prev_candidate and next_candidate:
+            expanded_candidates.add(row_index)
+
+    region_rows: dict[int, tuple[int, int]] = {}
+    region_id = 0
+    index = 0
+    while index < len(row_infos):
+        row_index = row_infos[index]["row_index"]
+        if row_index not in expanded_candidates:
+            index += 1
+            continue
+        start = index
+        end = index
+        while end + 1 < len(row_infos) and row_infos[end + 1]["row_index"] in expanded_candidates:
+            end += 1
+        region_infos = row_infos[start : end + 1]
+        multi_cluster_infos = [info for info in region_infos if len(info["clusters"]) >= 2]
+        if len(multi_cluster_infos) < 2:
+            index = end + 1
+            continue
+        signatures = [info["x_positions"] for info in multi_cluster_infos if info["x_positions"]]
+        signature_ok = False
+        for left, right in zip(signatures, signatures[1:]):
+            if compatible_pdf_column_signature(left, right):
+                signature_ok = True
+                break
+        if not signature_ok:
+            index = end + 1
+            continue
+        row_ordinal = 0
+        for info in region_infos:
+            region_rows[info["row_index"]] = (region_id, row_ordinal)
+            row_ordinal += 1
+        region_id += 1
+        index = end + 1
+    return region_rows
 
 
 def diff_token_kind(token: str) -> str:
@@ -2126,6 +2550,34 @@ def pdf_blocks_equal_after_cleanup(doc_block: Block, target_block: Block) -> boo
     if normalize_for_compare(strip_leading_markers(doc_block.text)) == normalize_for_compare(strip_leading_markers(target_block.text)):
         return True
     return False
+
+
+def pdf_minor_narrative_noise_only(doc_text: str, target_text: str) -> bool:
+    doc_clean = normalize_pdf_paragraph_artifacts(doc_text)
+    target_clean = normalize_pdf_paragraph_artifacts(target_text)
+    if not doc_clean or not target_clean:
+        return False
+    if difflib.SequenceMatcher(None, doc_clean, target_clean).ratio() < 0.995:
+        return False
+    doc_tokens = tokenize(doc_clean)
+    target_tokens = tokenize(target_clean)
+    if not doc_tokens or not target_tokens:
+        return False
+    total_changed = 0
+    matcher = difflib.SequenceMatcher(a=doc_tokens, b=target_tokens, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        doc_slice = doc_tokens[i1:i2]
+        target_slice = target_tokens[j1:j2]
+        if tag == "replace":
+            return False
+        if any(any(char.isdigit() for char in token) for token in doc_slice + target_slice):
+            return False
+        total_changed += len(doc_slice) + len(target_slice)
+        if total_changed > 2:
+            return False
+    return total_changed > 0
 
 
 def short_fragment_subsequence_similarity(fragment_tokens: list[str], container_tokens: list[str]) -> float:
@@ -3609,6 +4061,10 @@ def should_merge_ocr_paragraph(
 ) -> bool:
     if is_pdf_chrome_text(prev_text) or is_pdf_chrome_text(curr_text):
         return False
+    prev_contact = looks_like_contact_text(prev_text)
+    curr_contact = looks_like_contact_text(curr_text)
+    if prev_contact != curr_contact:
+        return False
     prev_x0, prev_y0, prev_x1, prev_y1 = prev_rect
     curr_x0, curr_y0, curr_x1, curr_y1 = curr_rect
     prev_h = max(1.0, prev_y1 - prev_y0)
@@ -3640,8 +4096,10 @@ def cluster_words_into_blocks(
     page_width: float,
     page_height: float,
     order_start: int,
+    table_index_start: int,
     pixmap: Any | None = None,
-) -> tuple[list[Block], dict[int, tuple[float, float, float, float]], dict[int, list[TokenRect]], dict[int, int], int]:
+    span_entries: list[dict[str, Any]] | None = None,
+) -> tuple[list[Block], dict[int, tuple[float, float, float, float]], dict[int, list[TokenRect]], dict[int, int], int, int]:
     blocks: list[Block] = []
     rects_by_order: dict[int, tuple[float, float, float, float]] = {}
     token_rects_by_order: dict[int, list[TokenRect]] = {}
@@ -3677,19 +4135,35 @@ def cluster_words_into_blocks(
             paragraph_text_parts = []
             return
         block_text = " ".join(part.strip() for part in paragraph_text_parts if part.strip()).strip()
-        if not visible_meaningful(block_text):
+        if not visible_meaningful(block_text) or is_pdf_chrome_text(block_text):
             paragraph_words = []
             paragraph_rect = None
             paragraph_text_parts = []
             return
+        runs = collect_pdf_runs_for_rect(paragraph_rect, span_entries)
+        if runs:
+            raw_text, proof_text, match_text = block_texts_from_runs(runs)
+            bold, italic, underline = formatting_flags_from_runs(runs)
+            block_text = raw_text or block_text
+        else:
+            proof_text = normalize_proof_text(block_text)
+            match_text = normalize_for_compare(proof_text)
+            bold = italic = underline = False
         block = Block(
             id=f"pdf-{order}",
             source="pdf",
             order=order,
             text=block_text,
-            normalized=normalize_for_compare(block_text),
+            normalized=match_text,
+            raw_text=block_text,
+            proof_text=proof_text,
+            match_text=match_text,
             table_cell=False,
             kind="pdf",
+            runs=runs,
+            bold=bold,
+            italic=italic,
+            underline=underline,
         )
         blocks.append(block)
         x0, y0, x1, y1 = paragraph_rect
@@ -3718,24 +4192,25 @@ def cluster_words_into_blocks(
         paragraph_rect = None
         paragraph_text_parts = []
 
-    for row_index, row_words in enumerate(row_groups):
-        row_words.sort(key=lambda word: word["rect"][0])
-        avg_height = sum(word["rect"][3] - word["rect"][1] for word in row_words) / max(len(row_words), 1)
-        cluster_gap = max(22.0, avg_height * 2.6)
-        clusters: list[list[dict[str, Any]]] = []
-        for word in row_words:
-            if not clusters:
-                clusters.append([word])
-                continue
-            prev_word = clusters[-1][-1]
-            gap = word["rect"][0] - prev_word["rect"][2]
-            if gap > cluster_gap:
-                clusters.append([word])
-            else:
-                clusters[-1].append(word)
+    row_infos = build_pdf_row_infos(
+        row_groups,
+        page_width=page_width,
+        page_height=page_height,
+        pixmap=pixmap,
+    )
+    region_rows = detect_pdf_table_regions(row_infos)
+    table_id_by_region: dict[int, int] = {}
+    next_table_index = table_index_start
+    for region_id, _row_ordinal in region_rows.values():
+        if region_id not in table_id_by_region:
+            table_id_by_region[region_id] = next_table_index
+            next_table_index += 1
 
-        meaningful_clusters = [cluster for cluster in clusters if visible_meaningful(" ".join(item["text"] for item in cluster))]
-        table_like = len(meaningful_clusters) > 1
+    for info in row_infos:
+        row_index = info["row_index"]
+        meaningful_clusters = info["clusters"]
+        table_meta = region_rows.get(row_index)
+        table_like = table_meta is not None
         if not table_like and len(meaningful_clusters) == 1:
             cluster = meaningful_clusters[0]
             cluster_text = join_words_for_pdf_cluster(
@@ -3767,6 +4242,8 @@ def cluster_words_into_blocks(
             continue
 
         flush_paragraph()
+        table_idx_value = table_id_by_region[table_meta[0]] if table_meta is not None else None
+        table_row_index = table_meta[1] if table_meta is not None else row_index
         row_key = (
             normalize_row_key(
                 join_words_for_pdf_cluster(
@@ -3790,16 +4267,30 @@ def cluster_words_into_blocks(
                 page_height=page_height,
                 pixmap=pixmap,
             )
+            if is_pdf_chrome_text(block_text):
+                if table_like:
+                    row_slot += 1
+                continue
             x0 = min(item["rect"][0] for item in cluster)
             y0 = min(item["rect"][1] for item in cluster)
             x1 = max(item["rect"][2] for item in cluster)
             y1 = max(item["rect"][3] for item in cluster)
+            cluster_rect = (x0, y0, x1, y1)
+            runs = collect_pdf_runs_for_rect(cluster_rect, span_entries)
+            if runs:
+                raw_text, proof_text, match_text = block_texts_from_runs(runs)
+                block_text = raw_text or block_text
+                bold, italic, underline = formatting_flags_from_runs(runs)
+            else:
+                proof_text = normalize_proof_text(block_text)
+                match_text = normalize_for_compare(proof_text)
+                bold = italic = underline = False
             temp_block = Block(
                 id="",
                 source="pdf",
                 order=0,
                 text=block_text,
-                normalized=normalize_for_compare(block_text),
+                normalized=match_text,
             )
             token = single_value_token(temp_block)
             block_numeric_slot = None
@@ -3812,13 +4303,20 @@ def cluster_words_into_blocks(
                 source="pdf",
                 order=order,
                 text=block_text,
-                normalized=normalize_for_compare(block_text),
+                normalized=match_text,
+                raw_text=block_text,
+                proof_text=proof_text,
+                match_text=match_text,
+                bold=bold,
+                italic=italic,
+                underline=underline,
                 table_cell=table_like,
                 kind="pdf",
-                table_pos=(page_number, row_index, row_slot) if table_like else None,
+                table_pos=(table_idx_value, table_row_index, row_slot) if table_like and table_idx_value is not None else None,
                 row_key=row_key,
                 row_slot=row_slot if table_like else None,
                 numeric_slot=block_numeric_slot,
+                runs=runs,
             )
             blocks.append(block)
             rects_by_order[order] = (x0, y0, x1 - x0, y1 - y0)
@@ -3848,7 +4346,7 @@ def cluster_words_into_blocks(
 
     flush_paragraph()
 
-    return blocks, rects_by_order, token_rects_by_order, page_numbers_by_order, order
+    return blocks, rects_by_order, token_rects_by_order, page_numbers_by_order, order, next_table_index
 
 
 def extract_pdf_blocks_via_ocr(path: Path) -> BrowserRenderResult:
@@ -3871,6 +4369,7 @@ def extract_pdf_blocks_via_ocr(path: Path) -> BrowserRenderResult:
     max_width = 1.0
     max_height = 1.0
     order = 0
+    table_index = 0
 
     for page_number, page in enumerate(document):
         page_rect = page.rect
@@ -3893,12 +4392,14 @@ def extract_pdf_blocks_via_ocr(path: Path) -> BrowserRenderResult:
             page_token_rects,
             page_numbers,
             order,
+            table_index,
         ) = cluster_words_into_blocks(
             words,
             page_number=page_number,
             page_width=float(page_rect.width),
             page_height=float(page_rect.height),
             order_start=order,
+            table_index_start=table_index,
             pixmap=dash_pixmap,
         )
         blocks.extend(page_blocks)
@@ -3918,11 +4419,77 @@ def extract_pdf_blocks_via_ocr(path: Path) -> BrowserRenderResult:
     )
 
 
-def extract_pdf_blocks(path: Path) -> BrowserRenderResult:
+def extract_pdf_blocks_from_words(path: Path) -> BrowserRenderResult:
     if fitz is None:
         raise RuntimeError(
             "PyMuPDF is not installed. Install it with `pip install PyMuPDF` to compare a DOCX against a PDF."
         )
+
+    document = fitz.open(path)
+    blocks: list[Block] = []
+    rects_by_order: dict[int, tuple[float, float, float, float]] = {}
+    token_rects_by_order: dict[int, list[TokenRect]] = {}
+    page_numbers_by_order: dict[int, int] = {}
+    max_width = 1.0
+    max_height = 1.0
+    order = 0
+    table_index = 0
+
+    for page_number, page in enumerate(document):
+        page_rect = page.rect
+        max_width = max(max_width, float(page_rect.width))
+        max_height = max(max_height, float(page_rect.height))
+        span_entries = build_pdf_span_entries(page)
+        words_raw = page.get_text("words")
+        words: list[dict[str, Any]] = []
+        for item in words_raw:
+            x0, y0, x1, y1, text = float(item[0]), float(item[1]), float(item[2]), float(item[3]), str(item[4] or "")
+            cleaned = normalize_text(text).strip()
+            if not visible_meaningful(cleaned):
+                continue
+            words.append({"text": cleaned, "rect": (x0, y0, x1, y1)})
+        (
+            page_blocks,
+            page_rects,
+            page_token_rects,
+            page_numbers,
+            order,
+            table_index,
+        ) = cluster_words_into_blocks(
+            words,
+            page_number=page_number,
+            page_width=float(page_rect.width),
+            page_height=float(page_rect.height),
+            order_start=order,
+            table_index_start=table_index,
+            span_entries=span_entries,
+        )
+        blocks.extend(page_blocks)
+        rects_by_order.update(page_rects)
+        token_rects_by_order.update(page_token_rects)
+        page_numbers_by_order.update(page_numbers)
+
+    document.close()
+    if not blocks:
+        return extract_pdf_blocks_via_ocr(path)
+    return BrowserRenderResult(
+        blocks=assign_structural_roles(blocks),
+        width_px=max_width,
+        height_px=max_height,
+        rects_by_order=rects_by_order,
+        token_rects_by_order=token_rects_by_order,
+        page_numbers_by_order=page_numbers_by_order,
+        coordinate_space="pdf_pt",
+    )
+
+
+def extract_pdf_blocks(path: Path, *, proofread_mode: bool = False) -> BrowserRenderResult:
+    if fitz is None:
+        raise RuntimeError(
+            "PyMuPDF is not installed. Install it with `pip install PyMuPDF` to compare a DOCX against a PDF."
+        )
+    if proofread_mode:
+        return extract_pdf_blocks_from_words(path)
 
     document = fitz.open(path)
     blocks: list[Block] = []
@@ -3945,7 +4512,7 @@ def extract_pdf_blocks(path: Path) -> BrowserRenderResult:
         for item in raw_blocks:
             x0, y0, x1, y1, text = float(item[0]), float(item[1]), float(item[2]), float(item[3]), str(item[4] or "")
             cleaned = normalize_text(text).strip()
-            if not visible_meaningful(cleaned):
+            if not visible_meaningful(cleaned) or is_pdf_chrome_text(cleaned):
                 continue
             text_blocks.append(
                 {
@@ -3994,6 +4561,10 @@ def extract_pdf_blocks(path: Path) -> BrowserRenderResult:
             numeric_slot = 0
             for entry in row:
                 block_text = entry["text"]
+                if is_pdf_chrome_text(block_text):
+                    if table_like:
+                        row_slot += 1
+                    continue
                 block_rect = entry["rect"]
                 token = single_value_token(
                     Block(
@@ -4239,7 +4810,13 @@ def match_embedded_pdf_blocks(
     return embedded_matches, consumed_doc_indices, covered_html_indices
 
 
-def compare_blocks(docx_blocks: list[Block], html_blocks: list[Block]) -> tuple[list[Match], list[Block], list[Block]]:
+def compare_blocks(
+    docx_blocks: list[Block],
+    html_blocks: list[Block],
+    *,
+    target_name: str = "html",
+    proofread_mode: bool = False,
+) -> tuple[list[Match], list[Block], list[Block]]:
     doc_to_html_table_map, _html_to_doc_table_map = align_table_families(docx_blocks, html_blocks)
     doc_header_ordinals, _doc_header_map = build_family_role_ordinals(docx_blocks)
     _html_header_ordinals, html_header_map = build_family_role_ordinals(html_blocks)
@@ -4321,9 +4898,11 @@ def compare_blocks(docx_blocks: list[Block], html_blocks: list[Block]) -> tuple[
         if html_index in used_html:
             continue
         score = group_similarity(doc_group, target_group)
-        if doc_group.group_type == "footnote" and score < 0.9:
+        footnote_group_floor = 0.9 if target_name == "html" else 0.84 if proofread_mode and target_name == "pdf" else 0.88 if target_name == "pdf" else 0.9
+        quote_group_floor = 0.9 if target_name == "html" else 0.82 if proofread_mode and target_name == "pdf" else 0.88 if target_name == "pdf" else 0.9
+        if doc_group.group_type == "footnote" and score < footnote_group_floor:
             continue
-        if doc_group.group_type == "quote" and score < 0.9:
+        if doc_group.group_type == "quote" and score < quote_group_floor:
             continue
         prematches.append(
             Match(
@@ -4664,7 +5243,8 @@ def compare_blocks(docx_blocks: list[Block], html_blocks: list[Block]) -> tuple[
             if score > best_score:
                 best_score = score
                 best_index = html_index
-        if best_index is not None and best_score >= 0.73:
+        approx_floor = 0.73 if target_name == "html" else 0.78 if proofread_mode and target_name == "pdf" else 0.74
+        if best_index is not None and best_score >= approx_floor:
             used_html.add(best_index)
             matches.append(
                 Match(
@@ -4749,10 +5329,11 @@ def compare_blocks(docx_blocks: list[Block], html_blocks: list[Block]) -> tuple[
         html_index = candidate_indices[0]
         target_block = html_blocks[html_index]
         score = similarity(doc_block.normalized, target_block.normalized)
-        if score < 0.62 and not (
+        row_recovery_floor = 0.62
+        if score < row_recovery_floor and not (
             doc_block.row_key
             and target_block.row_key
-            and similarity(doc_block.row_key, target_block.row_key) >= 0.62
+            and similarity(doc_block.row_key, target_block.row_key) >= row_recovery_floor
         ):
             continue
         matches.append(
@@ -4760,7 +5341,7 @@ def compare_blocks(docx_blocks: list[Block], html_blocks: list[Block]) -> tuple[
                 docx_index=doc_index,
                 html_index=html_index,
                 match_type="exact_structural" if score >= 0.82 else "approx",
-                score=max(score, 0.82 if score >= 0.62 else score),
+                score=max(score, 0.82 if score >= row_recovery_floor else score),
                 formatting_diffs=summarize_formatting_diff(doc_block, target_block),
             )
         )
@@ -4772,12 +5353,16 @@ def compare_blocks(docx_blocks: list[Block], html_blocks: list[Block]) -> tuple[
         unmatched_doc_indices = [index for index in unmatched_doc_indices if index not in recovered_doc_indices]
 
     covered_html = set(used_html)
-    embedded_matches, embedded_doc_indices, embedded_html_indices = match_embedded_pdf_blocks(
-        docx_blocks,
-        html_blocks,
-        unmatched_doc_indices,
-        [index for index in range(len(html_blocks)) if index not in covered_html],
-    )
+    embedded_matches: list[Match] = []
+    embedded_doc_indices: set[int] = set()
+    embedded_html_indices: set[int] = set()
+    if target_name == "pdf":
+        embedded_matches, embedded_doc_indices, embedded_html_indices = match_embedded_pdf_blocks(
+            docx_blocks,
+            html_blocks,
+            unmatched_doc_indices,
+            [index for index in range(len(html_blocks)) if index not in covered_html],
+        )
     matches.extend(embedded_matches)
     unmatched_doc_indices = [index for index in unmatched_doc_indices if index not in embedded_doc_indices]
     covered_html.update(embedded_html_indices)
@@ -5199,6 +5784,23 @@ def suppress_html_layout_spacing(
     return True
 
 
+def suppress_pdf_layout_spacing(
+    doc_block: Block,
+    target_block: Block,
+    *,
+    doc_token: DiffToken | None = None,
+    target_token: DiffToken | None = None,
+) -> bool:
+    if not (doc_block.table_cell and target_block.table_cell):
+        return False
+    if doc_token is not None and target_token is not None:
+        if doc_token.kind != target_token.kind:
+            return False
+        if doc_token.kind == "number":
+            return doc_token.normalized == target_token.normalized
+    return True
+
+
 def same_table_numeric_value_content(
     doc_block: Block,
     target_block: Block,
@@ -5290,6 +5892,13 @@ def contextual_equal_token_comments(
                     target_token=target_token,
                 ):
                     continue
+                if target_name == "pdf" and suppress_pdf_layout_spacing(
+                    doc_block,
+                    target_block,
+                    doc_token=doc_token,
+                    target_token=target_token,
+                ):
+                    continue
                 comments.append(
                     HtmlComment(
                         order=order,
@@ -5314,8 +5923,12 @@ def contextual_equal_token_comments(
             doc_sep_raw = inter_token_separator(doc_text, doc_left, doc_right)
             target_sep_raw = inter_token_separator(target_text, target_left, target_right)
             if proofread_mode and whitespace_signature(doc_sep_raw) != whitespace_signature(target_sep_raw):
+                if target_name == "pdf" and not doc_block.table_cell and not target_block.table_cell and spacing_is_only_pdf_line_wrap(doc_sep_raw, target_sep_raw):
+                    continue
                 if normalized_separator_symbol(doc_sep_raw) == normalized_separator_symbol(target_sep_raw):
                     if target_name == "html" and suppress_html_layout_spacing(doc_block, target_block):
+                        continue
+                    if target_name == "pdf" and suppress_pdf_layout_spacing(doc_block, target_block):
                         continue
                     comments.append(
                         HtmlComment(
@@ -5530,22 +6143,81 @@ def text_difference_comments(
             proofread_mode=proofread_mode,
             match_type=match_type,
         )
+    compare_doc_block = doc_block
+    compare_target_block = target_block
+    target_focus_applied = False
+    if target_name == "pdf" and grouped_match_type == "quote":
+        doc_quote = extract_primary_quote_text(doc_block.text)
+        target_quote = extract_primary_quote_text(target_block.text)
+        if doc_quote and target_quote:
+            target_focus_applied = True
+            compare_doc_block = Block(
+                id=f"{doc_block.id}-quote-focus",
+                source=doc_block.source,
+                order=doc_block.order,
+                text=doc_quote,
+                normalized=normalize_for_compare(doc_quote),
+                raw_text=doc_quote,
+                proof_text=normalize_proof_text(doc_quote),
+                match_text=normalize_for_compare(doc_quote),
+                structure_role=doc_block.structure_role,
+            )
+            compare_target_block = Block(
+                id=f"{target_block.id}-quote-focus",
+                source=target_block.source,
+                order=target_block.order,
+                text=target_quote,
+                normalized=normalize_for_compare(target_quote),
+                raw_text=target_quote,
+                proof_text=normalize_proof_text(target_quote),
+                match_text=normalize_for_compare(target_quote),
+                structure_role=target_block.structure_role,
+            )
+    elif target_name == "pdf" and not doc_block.table_cell and not target_block.table_cell:
+        focused_text = best_pdf_narrative_focus(doc_block, target_block)
+        body_text = pdf_embedded_lead_body(target_block)
+        if focused_text is not None:
+            target_focus_applied = True
+            compare_target_block = Block(
+                id=f"{target_block.id}-segment-focus",
+                source=target_block.source,
+                order=target_block.order,
+                text=focused_text,
+                normalized=normalize_for_compare(focused_text),
+                raw_text=focused_text,
+                proof_text=normalize_proof_text(focused_text),
+                match_text=normalize_for_compare(focused_text),
+                structure_role=target_block.structure_role,
+            )
+        elif body_text and similarity(normalize_for_compare(doc_block.text), normalize_for_compare(body_text)) >= 0.9:
+            target_focus_applied = True
+            compare_target_block = Block(
+                id=f"{target_block.id}-body-focus",
+                source=target_block.source,
+                order=target_block.order,
+                text=body_text,
+                normalized=normalize_for_compare(body_text),
+                raw_text=body_text,
+                proof_text=normalize_proof_text(body_text),
+                match_text=normalize_for_compare(body_text),
+                structure_role=target_block.structure_role,
+            )
     confidence_tier = match_confidence_tier(
-        doc_block,
-        target_block,
+        compare_doc_block,
+        compare_target_block,
         score=score,
         match_type=match_type,
         grouped_match_type=grouped_match_type,
         target_name=target_name,
     )
-    narrative_like = target_name == "html" and long_narrative_block(doc_block) and long_narrative_block(target_block)
+    narrative_like = target_name in {"html", "pdf"} and long_narrative_block(compare_doc_block) and long_narrative_block(compare_target_block)
     formatting_allowed = not (
         proofread_mode
-        and target_name == "html"
+        and target_name in {"html", "pdf"}
         and formatting_diffs
         and not exact_like_match_type(match_type)
-        and score < 0.92
-    ) and confidence_tier == "strong"
+        and score < (0.92 if target_name == "html" else 0.95)
+    ) and confidence_tier == "strong" and not (target_name == "pdf" and target_focus_applied)
     formatting_comments = [
         HtmlComment(
             order=target_block.order,
@@ -5561,8 +6233,8 @@ def text_difference_comments(
         and len(target_block.normalized) > max(len(doc_block.normalized) * 2, 160)
     )
     currency_comment = currency_symbol_comment(
-        doc_block,
-        target_block,
+        compare_doc_block,
+        compare_target_block,
         target_name=target_name,
         docx_blocks=docx_blocks,
         target_blocks=target_blocks,
@@ -5570,15 +6242,15 @@ def text_difference_comments(
     if currency_comment is not None:
         return [currency_comment]
     percent_comment = percent_symbol_comment(
-        doc_block,
-        target_block,
+        compare_doc_block,
+        compare_target_block,
         target_name=target_name,
     )
     if percent_comment is not None:
         return [percent_comment]
     numeric_comment = numeric_block_difference_comment(
-        doc_block,
-        target_block,
+        compare_doc_block,
+        compare_target_block,
         target_name=target_name,
         docx_blocks=docx_blocks,
         target_blocks=target_blocks,
@@ -5586,43 +6258,61 @@ def text_difference_comments(
     if numeric_comment is not None:
         return [numeric_comment]
     single_token_comments = single_token_target_comments(
-        doc_block,
-        target_block,
+        compare_doc_block,
+        compare_target_block,
         target_name=target_name,
         proofread_mode=proofread_mode,
     )
     if single_token_comments is not None:
         return single_token_comments
-    if target_name == "pdf" and pdf_blocks_equal_after_cleanup(doc_block, target_block):
-        if not spacing_only_difference(doc_block.text, target_block.text):
+    if target_name == "pdf" and pdf_blocks_equal_after_cleanup(compare_doc_block, compare_target_block):
+        if not spacing_only_difference(compare_doc_block.text, compare_target_block.text):
             return formatting_comments
+    if (
+        target_name == "pdf"
+        and not compare_doc_block.table_cell
+        and not compare_target_block.table_cell
+        and normalize_pdf_paragraph_artifacts(compare_doc_block.text) == normalize_pdf_paragraph_artifacts(compare_target_block.text)
+    ):
+        return formatting_comments
+    if (
+        target_name == "pdf"
+        and narrative_like
+        and not compare_doc_block.table_cell
+        and not compare_target_block.table_cell
+        and pdf_minor_narrative_noise_only(compare_doc_block.text, compare_target_block.text)
+    ):
+        return formatting_comments
     if not (proofread_mode and target_name == "html"):
-        doc_match_text = normalize_for_compare(strip_leading_markers(doc_block.text))
-        target_match_text = normalize_for_compare(strip_leading_markers(target_block.text))
+        doc_match_text = normalize_for_compare(strip_leading_markers(compare_doc_block.text))
+        target_match_text = normalize_for_compare(strip_leading_markers(compare_target_block.text))
         if doc_match_text == target_match_text:
-            if normalize_proof_text(doc_block.text) == normalize_proof_text(target_block.text):
+            if normalize_proof_text(compare_doc_block.text) == normalize_proof_text(compare_target_block.text):
                 return formatting_comments
     pdf_score_floor = 0.82 if proofread_mode else 0.9
-    if target_name == "pdf" and not contained_like and not doc_block.table_cell and not target_block.table_cell and score < pdf_score_floor:
+    if target_name == "pdf" and not contained_like and not compare_doc_block.table_cell and not compare_target_block.table_cell and score < pdf_score_floor:
         return []
     if confidence_tier == "weak":
         return []
     if grouped_match_type == "quote" and not exact_like_match_type(match_type):
-        if score < 0.88:
+        quote_floor = 0.88 if target_name == "html" else 0.8 if target_name == "pdf" else 0.88
+        quote_detail = 0.96 if target_name == "html" else 0.9 if target_name == "pdf" else 0.96
+        if score < quote_floor:
             return []
-        if score < 0.96 or narrative_like:
+        if score < quote_detail or narrative_like:
             return [
                 HtmlComment(
                     order=target_block.order,
-                    contents=quote_diff_summary(doc_block.text, target_block.text, target_name=target_name),
-                    token_index=0 if diff_tokens(target_block.text) else None,
+                    contents=quote_diff_summary(compare_doc_block.text, compare_target_block.text, target_name=target_name),
+                    token_index=0 if diff_tokens(compare_target_block.text) else None,
                 )
             ]
-    if narrative_like and not exact_like_match_type(match_type) and score < 0.88:
+    narrative_floor = 0.88 if target_name == "html" else 0.8 if target_name == "pdf" else 0.88
+    if narrative_like and not exact_like_match_type(match_type) and score < narrative_floor:
         return []
 
-    doc_tokens = diff_tokens(doc_block.text)
-    target_tokens = diff_tokens(target_block.text)
+    doc_tokens = diff_tokens(compare_doc_block.text)
+    target_tokens = diff_tokens(compare_target_block.text)
     if not doc_tokens and not target_tokens:
         return []
     target_offset = 0
@@ -5633,17 +6323,17 @@ def text_difference_comments(
 
     contextual_comments = contextual_equal_token_comments(
         doc_block=doc_block,
-        target_block=target_block,
-        order=target_block.order,
+        target_block=compare_target_block,
+        order=compare_target_block.order,
         target_name=target_name,
-        doc_text=doc_block.text,
-        target_text=target_block.text,
+        doc_text=compare_doc_block.text,
+        target_text=compare_target_block.text,
         doc_tokens=doc_tokens,
         target_tokens=target_tokens,
         target_offset=target_offset,
         proofread_mode=proofread_mode,
     )
-    if doc_block.normalized == target_block.normalized or score >= 0.999:
+    if compare_doc_block.normalized == compare_target_block.normalized or score >= 0.999:
         return contextual_comments or formatting_comments
 
     comments: list[HtmlComment] = []
@@ -5658,9 +6348,9 @@ def text_difference_comments(
         if tag == "replace":
             append_word_level_comments(
                 comments,
-                order=target_block.order,
-                doc_text=doc_block.text,
-                target_text=target_block.text,
+                order=compare_target_block.order,
+                doc_text=compare_doc_block.text,
+                target_text=compare_target_block.text,
                 target_tokens=target_tokens,
                 doc_slice=doc_tokens[i1:i2],
                 target_slice=target_tokens[j1:j2],
@@ -5671,9 +6361,9 @@ def text_difference_comments(
         if tag == "insert":
             append_word_level_comments(
                 comments,
-                order=target_block.order,
-                doc_text=doc_block.text,
-                target_text=target_block.text,
+                order=compare_target_block.order,
+                doc_text=compare_doc_block.text,
+                target_text=compare_target_block.text,
                 target_tokens=target_tokens,
                 doc_slice=[],
                 target_slice=target_tokens[j1:j2],
@@ -5684,9 +6374,9 @@ def text_difference_comments(
         if tag == "delete":
             append_word_level_comments(
                 comments,
-                order=target_block.order,
-                doc_text=doc_block.text,
-                target_text=target_block.text,
+                order=compare_target_block.order,
+                doc_text=compare_doc_block.text,
+                target_text=compare_target_block.text,
                 target_tokens=target_tokens,
                 doc_slice=doc_tokens[i1:i2],
                 target_slice=[],
@@ -5702,7 +6392,7 @@ def text_difference_comments(
             return [
                 HtmlComment(
                     order=target_block.order,
-                    contents=quote_diff_summary(doc_block.text, target_block.text, target_name=target_name),
+                    contents=quote_diff_summary(compare_doc_block.text, compare_target_block.text, target_name=target_name),
                     token_index=0 if target_tokens else None,
                 )
             ]
@@ -5712,8 +6402,8 @@ def text_difference_comments(
                     order=target_block.order,
                     contents=(
                         "The paragraph text is different. "
-                        f"{target_name.upper()}: {shorten(target_block.text, 160)} "
-                        f"Word: {shorten(doc_block.text, 160)}"
+                        f"{target_name.upper()}: {shorten(compare_target_block.text, 160)} "
+                        f"Word: {shorten(compare_doc_block.text, 160)}"
                     ),
                     token_index=0 if target_tokens else None,
                 )
@@ -5731,20 +6421,20 @@ def text_difference_comments(
                     order=target_block.order,
                     contents=(
                         "The footnote text is different. "
-                        f"{target_name.upper()}: {shorten(target_block.text, 140)} "
-                        f"Word: {shorten(doc_block.text, 140)}"
+                        f"{target_name.upper()}: {shorten(compare_target_block.text, 140)} "
+                        f"Word: {shorten(compare_doc_block.text, 140)}"
                     ),
                     token_index=0 if target_tokens else None,
                 )
             ]
-        if target_name == "html" and narrative_like and not exact_like_match_type(match_type):
+        if target_name in {"html", "pdf"} and narrative_like and not exact_like_match_type(match_type):
             return [
                 HtmlComment(
                     order=target_block.order,
                     contents=(
                         "The paragraph text is different. "
-                        f"{target_name.upper()}: {shorten(target_block.text, 160)} "
-                        f"Word: {shorten(doc_block.text, 160)}"
+                        f"{target_name.upper()}: {shorten(compare_target_block.text, 160)} "
+                        f"Word: {shorten(compare_doc_block.text, 160)}"
                     ),
                     token_index=0 if target_tokens else None,
                 )
@@ -5771,28 +6461,28 @@ def text_difference_comments(
             target_name == "pdf"
             and comments
             and all(comment.contents == "The number is missing in pdf, 1 in word." for comment in comments)
-            and re.search(r"\(\s*1\s*\)", doc_block.text)
+            and re.search(r"\(\s*1\s*\)", compare_doc_block.text)
         ):
             return []
         if (
             target_name == "pdf"
-            and not doc_block.table_cell
-            and not target_block.table_cell
+            and not compare_doc_block.table_cell
+            and not compare_target_block.table_cell
             and len(comments) <= 2
-            and len(doc_block.text) <= 80
-            and len(target_block.text) <= 80
+            and len(compare_doc_block.text) <= 80
+            and len(compare_target_block.text) <= 80
             and all(comment.contents.startswith("The word is extra in pdf,") for comment in comments)
-            and token_subsequence_ratio(doc_block.normalized, target_block.normalized) >= 0.99
+            and token_subsequence_ratio(compare_doc_block.normalized, compare_target_block.normalized) >= 0.99
         ):
             return []
-        if target_name == "pdf" and not doc_block.table_cell and not target_block.table_cell and len(comments) > (8 if proofread_mode else 4):
+        if target_name == "pdf" and not compare_doc_block.table_cell and not compare_target_block.table_cell and len(comments) > (8 if proofread_mode else 4):
             return [
                 HtmlComment(
-                    order=target_block.order,
+                    order=compare_target_block.order,
                     contents=(
                         "The paragraph text differs between the PDF and Word. "
-                        f"PDF: {shorten(target_block.text, 140)} "
-                        f"Word: {shorten(doc_block.text, 140)}"
+                        f"PDF: {shorten(compare_target_block.text, 140)} "
+                        f"Word: {shorten(compare_doc_block.text, 140)}"
                     ),
                     token_index=0 if target_tokens else None,
                 )
@@ -5802,28 +6492,42 @@ def text_difference_comments(
     if formatting_comments:
         return formatting_comments
 
-    if target_name == "html" and prnewswire_only_difference(doc_block.text, target_block.text):
-        pr_tokens = diff_tokens(target_block.text)
+    if target_name == "html" and prnewswire_only_difference(compare_doc_block.text, compare_target_block.text):
+        pr_tokens = diff_tokens(compare_target_block.text)
         pr_index = next((index for index, token in enumerate(pr_tokens) if token.normalized == "prnewswire"), None)
         return [
             HtmlComment(
-                order=target_block.order,
+                order=compare_target_block.order,
                 contents="The word is extra in html, PRNewswire. It is not present in word.",
                 token_index=pr_index,
             )
         ]
 
-    if target_name == "pdf" and normalize_without_punctuation(doc_block.text) == normalize_without_punctuation(target_block.text):
+    if target_name == "pdf" and normalize_without_punctuation(compare_doc_block.text) == normalize_without_punctuation(compare_target_block.text):
         return []
 
     if (
         target_name == "html"
-        and doc_block.table_cell
-        and target_block.table_cell
-        and suppress_html_layout_spacing(doc_block, target_block)
+        and compare_doc_block.table_cell
+        and compare_target_block.table_cell
+        and suppress_html_layout_spacing(compare_doc_block, compare_target_block)
         and same_table_numeric_value_content(
-            doc_block,
-            target_block,
+            compare_doc_block,
+            compare_target_block,
+            docx_blocks=docx_blocks,
+            target_blocks=target_blocks,
+        )
+    ):
+        return formatting_comments
+
+    if (
+        target_name == "pdf"
+        and compare_doc_block.table_cell
+        and compare_target_block.table_cell
+        and suppress_pdf_layout_spacing(compare_doc_block, compare_target_block)
+        and same_table_numeric_value_content(
+            compare_doc_block,
+            compare_target_block,
             docx_blocks=docx_blocks,
             target_blocks=target_blocks,
         )
@@ -5836,23 +6540,23 @@ def text_difference_comments(
     if grouped_match_type == "footnote":
         return [
             HtmlComment(
-                order=target_block.order,
-                contents=(
-                    "The footnote text is different. "
-                    f"{target_name.upper()}: {shorten(target_block.text, 140)} "
-                    f"Word: {shorten(doc_block.text, 140)}"
-                ),
-                token_index=0 if target_tokens else None,
-            )
-        ]
+                    order=target_block.order,
+                    contents=(
+                        "The footnote text is different. "
+                        f"{target_name.upper()}: {shorten(compare_target_block.text, 140)} "
+                        f"Word: {shorten(compare_doc_block.text, 140)}"
+                    ),
+                    token_index=0 if target_tokens else None,
+                )
+            ]
 
     return [
         HtmlComment(
-            order=target_block.order,
+            order=compare_target_block.order,
             contents=(
                 "The paragraph text is different. "
-                f"{target_name.upper()}: {shorten(target_block.text, 140)} "
-                f"Word: {shorten(doc_block.text, 140)}"
+                f"{target_name.upper()}: {shorten(compare_target_block.text, 140)} "
+                f"Word: {shorten(compare_doc_block.text, 140)}"
             ),
             token_index=0 if target_tokens else None,
         )
@@ -6161,6 +6865,17 @@ def build_comments(
         for target_block in target_candidates:
             if target_block.table_cell != block.table_cell:
                 continue
+            if target_label == "PDF" and is_pdf_chrome_text(target_block.text):
+                continue
+            if (
+                proofread_mode
+                and target_label == "PDF"
+                and not (
+                    structural_role_compatible(block, target_block)
+                    or compatible_header_family_roles(block.structure_role or "", target_block.structure_role or "")
+                )
+            ):
+                continue
             if (
                 block.table_cell
                 and block.row_key
@@ -6185,6 +6900,11 @@ def build_comments(
             return []
 
         overlap = token_overlap_ratio(block.normalized, best_target_block.normalized)
+        if proofread_mode and target_label == "PDF" and not block.table_cell:
+            if overlap < 0.7:
+                return []
+            if best_score < 0.84:
+                return []
         strong_near_match = (
             best_score >= (
                 0.86 if proofread_mode and target_label == "HTML"
@@ -6268,9 +6988,35 @@ def build_comments(
             ]
         )
     if target_label == "PDF":
+        pdf_fallback_ids: set[str] = set()
         for block in unmatched_docx:
-            html_comments.extend(unmatched_docx_fallback_comments(block))
-        appendix_comments = []
+            fallback_comments = unmatched_docx_fallback_comments(block)
+            if fallback_comments:
+                html_comments.extend(fallback_comments)
+                pdf_fallback_ids.add(block.id)
+        if proofread_mode:
+            remaining_pdf_docx = [
+                block
+                for block in unmatched_docx
+                if block.id not in family_covered_docx_ids and block.id not in pdf_fallback_ids
+            ]
+            appendix_comments = list(family_appendix_comments)
+            if family_appendix_comments:
+                appendix_comments.extend(
+                    [
+                        (block, f"This DOCX content was not found in the {target_label}.")
+                        for block in remaining_pdf_docx
+                    ]
+                )
+            else:
+                appendix_comments.extend(
+                    [
+                        (block, f"This DOCX content was not found in the {target_label}.")
+                        for block in appendix_summary_blocks(docx_blocks, remaining_pdf_docx)
+                    ]
+                )
+        else:
+            appendix_comments = []
     return html_comments, appendix_comments
 
 
@@ -6359,7 +7105,10 @@ def pdf_page_summary_comments(
     unmatched_pdf: list[Block],
     matches: list[Match],
     render_result: BrowserRenderResult,
+    proofread_mode: bool = False,
 ) -> list[HtmlComment]:
+    if proofread_mode:
+        return []
     matched_pages: Counter[int] = Counter()
     unmatched_by_page: dict[int, list[Block]] = {}
     order_by_page: dict[int, int] = {}
@@ -6404,12 +7153,12 @@ def should_emit_pdf_page_summary_comment(
     matched_count: int,
     docx_blocks: list[Block],
 ) -> bool:
-    if len(meaningful_blocks) < 3:
+    if len(meaningful_blocks) < 5:
         return False
     top_blocks = meaningful_blocks[:3]
     if any(pdf_block_has_docx_anchor(block, docx_blocks) for block in top_blocks):
         return False
-    if matched_count > 0 and not (matched_count <= 1 and len(meaningful_blocks) >= 6):
+    if matched_count > 0:
         return False
     return True
 
@@ -6866,7 +7615,12 @@ def run_compare(
     else:
         html_blocks = extract_html_blocks(html_path)
 
-    matches, unmatched_docx, unmatched_html = compare_blocks(docx_blocks, html_blocks)
+    matches, unmatched_docx, unmatched_html = compare_blocks(
+        docx_blocks,
+        html_blocks,
+        target_name="html",
+        proofread_mode=proofread_mode,
+    )
     html_comments, appendix_comments = build_comments(
         docx_blocks,
         html_blocks,
@@ -6918,10 +7672,15 @@ def run_compare_pdf(
 ) -> dict[str, object]:
     output_path = output_path or Path(default_pdf_output_name(pdf_path))
     docx_blocks = extract_docx_blocks(docx_path)
-    render_result = extract_pdf_blocks(pdf_path)
+    render_result = extract_pdf_blocks(pdf_path, proofread_mode=proofread_mode)
     pdf_blocks = render_result.blocks
 
-    matches, unmatched_docx, unmatched_pdf = compare_blocks(docx_blocks, pdf_blocks)
+    matches, unmatched_docx, unmatched_pdf = compare_blocks(
+        docx_blocks,
+        pdf_blocks,
+        target_name="pdf",
+        proofread_mode=proofread_mode,
+    )
     pdf_comments, appendix_comments = build_comments(
         docx_blocks,
         pdf_blocks,
@@ -6931,15 +7690,16 @@ def run_compare_pdf(
         target_label="PDF",
         proofread_mode=proofread_mode,
     )
-    pdf_comments.extend(
-        pdf_page_summary_comments(
-            docx_blocks=docx_blocks,
-            pdf_blocks=pdf_blocks,
-            unmatched_pdf=unmatched_pdf,
-            matches=matches,
-            render_result=render_result,
+    if not proofread_mode:
+        pdf_comments.extend(
+            pdf_page_summary_comments(
+                docx_blocks=docx_blocks,
+                pdf_blocks=pdf_blocks,
+                unmatched_pdf=unmatched_pdf,
+                matches=matches,
+                render_result=render_result,
+            )
         )
-    )
     output_path.write_bytes(pdf_path.read_bytes())
     annotate_existing_pdf(
         pdf_path=output_path,
@@ -6953,7 +7713,7 @@ def run_compare_pdf(
     summary["renderer"] = "pdf"
     summary["target_kind"] = "pdf"
     summary["compare_profile"] = "proofread" if proofread_mode else "standard"
-    summary["formatting_scope"] = "token, symbol, spacing, and limited structural checks; full visual formatting is not guaranteed for PDFs"
+    summary["formatting_scope"] = "token, symbol, spacing, grouped narrative/footnote checks, and limited structural formatting; full visual formatting is not guaranteed for PDFs"
     summary["output_pdf"] = str(output_path)
     if summary_json_path:
         summary_json_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")

@@ -530,7 +530,7 @@
             <input type="checkbox" id="proofreadToggle" checked />
             <span class="profile-copy">
               <strong>Proofread Mode</strong>
-              <span id="proofreadCopy">Use stricter token, symbol, spacing, and near-match fallback rules for DOCX versus PDF review. This is the recommended PDF profile, but full visual formatting equivalence is still not guaranteed.</span>
+              <span id="proofreadCopy">Use stricter token, symbol, spacing, grouped section, and structural fallback rules for DOCX versus PDF review. This is the recommended PDF proofread profile, but full visual formatting equivalence is still not guaranteed.</span>
             </span>
           </label>
         </div>
@@ -657,7 +657,7 @@
         onlyLabel: 'PDF / DOCX Only',
         panelSub: 'Use one Word `.docx` file and one PDF file. The compare job runs locally on this machine and annotates the PDF itself.',
         heroBody: 'This interface runs the local comparison pipeline, extracts positioned text from the PDF, and annotates the copied PDF with meaningful content differences against the Word source.',
-        proofreadCopy: 'Use stricter token, symbol, spacing, and near-match fallback rules for DOCX versus PDF review. This is the recommended PDF profile, but full visual formatting equivalence is still not guaranteed.',
+        proofreadCopy: 'Use stricter token, symbol, spacing, grouped section, and structural fallback rules for DOCX versus PDF review. This is the recommended PDF proofread profile, but full visual formatting equivalence is still not guaranteed.',
         ready: 'Ready to generate the annotated PDF.',
         waiting: 'Waiting for both files.',
         working: 'Generating annotated PDF from the source PDF. This can take a few seconds on larger documents...',

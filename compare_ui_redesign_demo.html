@@ -1,0 +1,1219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Compare UI Redesign Demo</title>
+  <style>
+    :root {
+      --black: #000000;
+      --white: #ffffff;
+      --glass-dark: rgba(0, 0, 0, 0.08);
+      --glass-light: rgba(255, 255, 255, 0.16);
+      --border: rgba(0, 0, 0, 0.12);
+      --border-subtle: rgba(0, 0, 0, 0.06);
+      --text-muted: rgba(0, 0, 0, 0.56);
+      --text-faint: rgba(0, 0, 0, 0.42);
+      --surface: #ffffff;
+      --surface-soft: rgba(0, 0, 0, 0.03);
+      --focus: 2px dashed #000000;
+      --hero-gradient:
+        radial-gradient(circle at 18% 24%, rgba(10, 207, 131, 0.95) 0 12%, transparent 32%),
+        radial-gradient(circle at 80% 20%, rgba(162, 89, 255, 0.95) 0 16%, transparent 36%),
+        radial-gradient(circle at 72% 68%, rgba(242, 78, 30, 0.96) 0 14%, transparent 34%),
+        radial-gradient(circle at 32% 80%, rgba(255, 114, 98, 0.92) 0 16%, transparent 34%),
+        linear-gradient(135deg, #0acf83 0%, #1abcfe 18%, #a259ff 44%, #f24e1e 70%, #ff7262 100%);
+      --shadow-card: 0 16px 40px rgba(0, 0, 0, 0.08);
+      --font-sans: "figmaSans", "SF Pro Display", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --font-mono: "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      --radius-card: 8px;
+      --radius-pill: 50px;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      min-height: 100vh;
+      background: var(--white);
+      color: var(--black);
+      font-family: var(--font-sans);
+      font-size: 16px;
+      font-weight: 340;
+      line-height: 1.45;
+      letter-spacing: -0.14px;
+      font-feature-settings: "kern" 1;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    button,
+    input,
+    textarea {
+      font: inherit;
+      font-feature-settings: "kern" 1;
+    }
+
+    button:focus-visible,
+    a:focus-visible,
+    input:focus-visible,
+    textarea:focus-visible {
+      outline: var(--focus);
+      outline-offset: 3px;
+    }
+
+    .nav {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      background: rgba(255, 255, 255, 0.92);
+      backdrop-filter: blur(16px);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .nav-inner {
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 16px 28px;
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      align-items: center;
+      gap: 22px;
+    }
+
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: -0.26px;
+    }
+
+    .brand-mark {
+      width: 26px;
+      height: 26px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #000 0 40%, #fff 40% 60%, #000 60% 100%);
+      border: 1px solid var(--black);
+    }
+
+    .nav-links {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 28px;
+    }
+
+    .nav-links a {
+      border-bottom: 1px solid transparent;
+      transition: opacity 160ms ease, border-color 160ms ease;
+    }
+
+    .nav-links a:hover {
+      opacity: 0.6;
+      border-color: var(--black);
+    }
+
+    .nav-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      justify-self: end;
+    }
+
+    .pill-button,
+    .pill-button-secondary,
+    .pill-button-ghost {
+      appearance: none;
+      border: none;
+      border-radius: var(--radius-pill);
+      padding: 8px 18px 10px;
+      cursor: pointer;
+      transition: transform 180ms ease, opacity 180ms ease, background 180ms ease;
+    }
+
+    .pill-button:hover,
+    .pill-button-secondary:hover,
+    .pill-button-ghost:hover {
+      transform: translateY(-1px);
+    }
+
+    .pill-button {
+      background: var(--black);
+      color: var(--white);
+      font-weight: 480;
+    }
+
+    .pill-button-secondary {
+      background: var(--white);
+      color: var(--black);
+      border: 1px solid var(--black);
+      font-weight: 480;
+    }
+
+    .pill-button-ghost {
+      background: var(--glass-dark);
+      color: var(--black);
+      font-weight: 400;
+    }
+
+    .page {
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 0 28px 72px;
+    }
+
+    .hero {
+      margin-top: 18px;
+      border-radius: 20px;
+      overflow: hidden;
+      background: var(--hero-gradient);
+      color: var(--white);
+      box-shadow: var(--shadow-card);
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: 1.05fr 0.95fr;
+      gap: 24px;
+      padding: 56px 44px 44px;
+      align-items: end;
+    }
+
+    .eyebrow {
+      display: inline-block;
+      margin-bottom: 18px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      line-height: 1;
+      opacity: 0.92;
+    }
+
+    .hero h1 {
+      font-size: clamp(52px, 7vw, 86px);
+      font-weight: 400;
+      line-height: 1;
+      letter-spacing: -1.72px;
+      max-width: 11ch;
+    }
+
+    .hero p {
+      margin-top: 22px;
+      max-width: 56ch;
+      color: rgba(255, 255, 255, 0.86);
+      font-size: 20px;
+      font-weight: 330;
+      line-height: 1.4;
+      letter-spacing: -0.14px;
+    }
+
+    .hero-actions {
+      margin-top: 30px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+    }
+
+    .glass-pill {
+      appearance: none;
+      border: none;
+      border-radius: var(--radius-pill);
+      background: var(--glass-light);
+      color: var(--white);
+      padding: 8px 18px 10px;
+      font-weight: 480;
+      backdrop-filter: blur(10px);
+      cursor: pointer;
+      transition: transform 180ms ease, background 180ms ease;
+    }
+
+    .glass-pill:hover {
+      transform: translateY(-1px);
+      background: rgba(255, 255, 255, 0.22);
+    }
+
+    .hero-preview {
+      background: rgba(255, 255, 255, 0.14);
+      border: 1px solid rgba(255, 255, 255, 0.22);
+      border-radius: 18px;
+      backdrop-filter: blur(14px);
+      padding: 18px;
+      min-height: 380px;
+      display: grid;
+      align-content: space-between;
+    }
+
+    .preview-label {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      opacity: 0.9;
+    }
+
+    .preview-window {
+      margin-top: 14px;
+      background: rgba(255, 255, 255, 0.94);
+      color: var(--black);
+      border-radius: 12px;
+      overflow: hidden;
+      min-height: 260px;
+    }
+
+    .window-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+
+    .window-dots {
+      display: inline-flex;
+      gap: 6px;
+    }
+
+    .window-dots span {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: rgba(0, 0, 0, 0.18);
+    }
+
+    .window-title {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      letter-spacing: 0.6px;
+      text-transform: uppercase;
+      color: var(--text-muted);
+    }
+
+    .window-content {
+      padding: 18px;
+      display: grid;
+      gap: 14px;
+    }
+
+    .window-row {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .window-card {
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      padding: 14px;
+      background: var(--white);
+    }
+
+    .window-card strong {
+      display: block;
+      font-size: 24px;
+      font-weight: 540;
+      letter-spacing: -0.26px;
+    }
+
+    .window-card span {
+      display: block;
+      margin-top: 8px;
+      color: var(--text-muted);
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    .stage {
+      margin-top: 34px;
+      display: grid;
+      grid-template-columns: 400px minmax(0, 1fr);
+      gap: 26px;
+      align-items: start;
+    }
+
+    .panel,
+    .results-panel {
+      background: var(--surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-card);
+    }
+
+    .panel {
+      padding: 24px;
+    }
+
+    .section-label {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      color: var(--text-muted);
+      line-height: 1;
+    }
+
+    .panel h2,
+    .results-panel h2 {
+      margin-top: 12px;
+      font-size: 26px;
+      font-weight: 540;
+      line-height: 1.35;
+      letter-spacing: -0.26px;
+    }
+
+    .panel-copy,
+    .results-copy {
+      margin-top: 8px;
+      color: var(--text-muted);
+      font-size: 18px;
+      font-weight: 320;
+      line-height: 1.45;
+      letter-spacing: -0.26px;
+    }
+
+    .mode-switch {
+      margin-top: 22px;
+      display: inline-flex;
+      gap: 8px;
+      padding: 6px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--white);
+    }
+
+    .mode-button {
+      appearance: none;
+      border: none;
+      background: transparent;
+      color: var(--black);
+      border-radius: 999px;
+      padding: 10px 16px;
+      cursor: pointer;
+      font-weight: 400;
+      transition: background 160ms ease, color 160ms ease;
+    }
+
+    .mode-button.active {
+      background: var(--black);
+      color: var(--white);
+      font-weight: 480;
+    }
+
+    .drop-grid {
+      margin-top: 20px;
+      display: grid;
+      gap: 14px;
+    }
+
+    .dropzone {
+      position: relative;
+      display: block;
+      min-height: 176px;
+      padding: 18px;
+      border-radius: 8px;
+      border: 1px dashed rgba(0, 0, 0, 0.22);
+      background: var(--white);
+      transition: transform 180ms ease, border-color 180ms ease, background 180ms ease;
+      cursor: pointer;
+    }
+
+    .dropzone.dragover,
+    .dropzone:hover {
+      transform: translateY(-1px);
+      border-color: var(--black);
+      background: rgba(0, 0, 0, 0.02);
+    }
+
+    .dropzone input {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      cursor: pointer;
+    }
+
+    .drop-head {
+      display: flex;
+      align-items: start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .drop-kicker {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      color: var(--text-muted);
+      line-height: 1;
+      margin-bottom: 8px;
+    }
+
+    .drop-title {
+      font-size: 24px;
+      font-weight: 700;
+      line-height: 1.45;
+      letter-spacing: normal;
+    }
+
+    .drop-glyph {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      border: 1px solid var(--border);
+      background: var(--glass-dark);
+      display: grid;
+      place-items: center;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      letter-spacing: 0.6px;
+      text-transform: uppercase;
+    }
+
+    .drop-help {
+      color: var(--text-muted);
+      font-size: 16px;
+      font-weight: 330;
+      line-height: 1.45;
+    }
+
+    .file-chip {
+      display: none;
+      margin-top: 16px;
+      padding: 14px;
+      border-radius: 8px;
+      background: var(--surface-soft);
+      border: 1px solid var(--border-subtle);
+    }
+
+    .file-chip.active {
+      display: block;
+    }
+
+    .file-chip strong {
+      display: block;
+      font-size: 16px;
+      font-weight: 450;
+      line-height: 1.45;
+    }
+
+    .file-chip span {
+      display: block;
+      margin-top: 4px;
+      color: var(--text-muted);
+      word-break: break-word;
+    }
+
+    .proofread-box {
+      display: none;
+      margin-top: 16px;
+      padding: 16px;
+      border-radius: 8px;
+      background: var(--white);
+      border: 1px solid var(--border);
+    }
+
+    .proofread-box.active {
+      display: block;
+    }
+
+    .proofread-toggle {
+      display: flex;
+      gap: 12px;
+      align-items: start;
+    }
+
+    .proofread-copy strong {
+      display: block;
+      font-size: 16px;
+      font-weight: 450;
+      line-height: 1.45;
+    }
+
+    .proofread-copy span {
+      display: block;
+      margin-top: 4px;
+      color: var(--text-muted);
+      font-size: 16px;
+      font-weight: 330;
+      line-height: 1.45;
+    }
+
+    .actions {
+      margin-top: 18px;
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .status {
+      margin-top: 18px;
+      padding: 16px;
+      min-height: 72px;
+      border-radius: 8px;
+      background: var(--white);
+      border: 1px solid var(--border-subtle);
+      color: var(--text-muted);
+      line-height: 1.5;
+      white-space: pre-wrap;
+    }
+
+    .fineprint {
+      margin-top: 14px;
+      color: var(--text-faint);
+      font-size: 14px;
+      font-weight: 330;
+      line-height: 1.45;
+    }
+
+    .results-panel {
+      padding: 24px;
+    }
+
+    .results-empty {
+      min-height: 740px;
+      display: grid;
+      place-items: center;
+      text-align: center;
+      border: 1px dashed var(--border);
+      border-radius: 8px;
+      background: linear-gradient(180deg, #fff, rgba(0, 0, 0, 0.02));
+      padding: 28px;
+    }
+
+    .results-body {
+      display: none;
+    }
+
+    .results-body.active {
+      display: block;
+    }
+
+    .summary-head {
+      display: flex;
+      align-items: start;
+      justify-content: space-between;
+      gap: 18px;
+      margin-bottom: 18px;
+    }
+
+    .summary-actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+
+    .metric {
+      padding: 16px;
+      border-radius: 8px;
+      border: 1px solid var(--border-subtle);
+      background: var(--white);
+    }
+
+    .metric-label {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      color: var(--text-muted);
+    }
+
+    .metric-value {
+      margin-top: 12px;
+      font-size: 36px;
+      font-weight: 400;
+      line-height: 1;
+      letter-spacing: -0.96px;
+    }
+
+    .metric-note {
+      margin-top: 8px;
+      color: var(--text-muted);
+      font-size: 16px;
+      font-weight: 330;
+      line-height: 1.45;
+    }
+
+    .meta-strip {
+      padding: 16px;
+      border-radius: 8px;
+      background: var(--surface-soft);
+      border: 1px solid var(--border-subtle);
+      color: var(--text-muted);
+      line-height: 1.55;
+    }
+
+    .preview-shell {
+      margin-top: 18px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--white);
+    }
+
+    .preview-topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+
+    .preview-topbar span {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      color: var(--text-muted);
+    }
+
+    iframe {
+      display: block;
+      width: 100%;
+      min-height: 620px;
+      border: 0;
+      background: var(--white);
+    }
+
+    @media (max-width: 1160px) {
+      .hero-grid,
+      .stage {
+        grid-template-columns: 1fr;
+      }
+
+      .nav-inner {
+        grid-template-columns: 1fr;
+      }
+
+      .nav-links,
+      .nav-actions {
+        justify-self: start;
+      }
+    }
+
+    @media (max-width: 760px) {
+      .page,
+      .nav-inner {
+        padding-left: 16px;
+        padding-right: 16px;
+      }
+
+      .hero-grid {
+        padding: 40px 20px 20px;
+      }
+
+      .metrics,
+      .window-row {
+        grid-template-columns: 1fr;
+      }
+
+      .summary-head {
+        flex-direction: column;
+      }
+
+      .nav-links {
+        flex-wrap: wrap;
+        gap: 14px 18px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="nav">
+    <div class="nav-inner">
+      <a class="brand" href="/demo-redesign">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span>Compare redesign</span>
+      </a>
+      <nav class="nav-links" aria-label="Preview links">
+        <a href="#demo-flow">Workflow</a>
+        <a href="#demo-flow">Proofread</a>
+        <a href="#demo-flow">Preview</a>
+        <a href="/">Current page</a>
+      </nav>
+      <div class="nav-actions">
+        <a class="pill-button-ghost" href="/">Keep current main page</a>
+        <button id="jumpCompareBtn" class="pill-button" type="button">Open demo flow</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="page">
+    <section class="hero">
+      <div class="hero-grid">
+        <div>
+          <span class="eyebrow">Figma-inspired redesign demo</span>
+          <h1>Proofread the release like a product demo, not a utility form.</h1>
+          <p id="heroBody">This is a separate preview page built from the Figma design guide. The interface chrome stays black and white, while the hero carries the color. The compare workflow and API stay local and unchanged.</p>
+          <div class="hero-actions">
+            <button class="pill-button-secondary" type="button">Demo only</button>
+            <button class="glass-pill" type="button">Main page untouched</button>
+          </div>
+        </div>
+        <div class="hero-preview">
+          <span class="preview-label">Local proofread workspace</span>
+          <div class="preview-window">
+            <div class="window-top">
+              <div class="window-dots"><span></span><span></span><span></span></div>
+              <div class="window-title">compare session</div>
+            </div>
+            <div class="window-content">
+              <div class="window-row">
+                <div class="window-card">
+                  <strong>DOCX</strong>
+                  <span>Baseline source file for the review run.</span>
+                </div>
+                <div class="window-card">
+                  <strong>HTML / PDF</strong>
+                  <span>Target file rendered into an annotated review PDF.</span>
+                </div>
+                <div class="window-card">
+                  <strong>Proofread</strong>
+                  <span>Strict compare profile with embedded comments.</span>
+                </div>
+              </div>
+              <div class="window-card">
+                <strong>Separate demo route</strong>
+                <span>This preview replaces the Airbnb demo concept and keeps the current main page intact until you choose a direction.</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="stage" id="demo-flow">
+      <section class="panel">
+        <div class="section-label">Input flow</div>
+        <h2>Run a compare</h2>
+        <p class="panel-copy" id="panelSub">Use one Word `.docx` file and one saved webpage `.html` or `.htm` file. The compare job runs locally on this machine.</p>
+
+        <div class="mode-switch" role="tablist" aria-label="Compare mode">
+          <button id="modeHtml" class="mode-button active" type="button">DOCX vs HTML</button>
+          <button id="modePdf" class="mode-button" type="button">DOCX vs PDF</button>
+        </div>
+
+        <div class="drop-grid">
+          <label class="dropzone" id="docxZone">
+            <input type="file" id="docxInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
+            <div class="drop-head">
+              <div>
+                <div class="drop-kicker">Source A</div>
+                <div class="drop-title">Word baseline</div>
+              </div>
+              <div class="drop-glyph">DOCX</div>
+            </div>
+            <p class="drop-help">Drop the Word source document here. It stays the baseline for all proofreading differences.</p>
+            <div class="file-chip" id="docxChip">
+              <strong id="docxName">No file selected</strong>
+              <span id="docxMeta"></span>
+            </div>
+          </label>
+
+          <label class="dropzone" id="targetZone">
+            <input type="file" id="targetInput" accept=".html,.htm,text/html" />
+            <div class="drop-head">
+              <div>
+                <div class="drop-kicker">Source B</div>
+                <div class="drop-title" id="targetTitle">Saved webpage</div>
+              </div>
+              <div class="drop-glyph" id="targetGlyph">HTML</div>
+            </div>
+            <p class="drop-help" id="targetHelp">Drop the saved webpage file here. This gets rendered and annotated as the review PDF.</p>
+            <div class="file-chip" id="targetChip">
+              <strong id="targetName">No file selected</strong>
+              <span id="targetMeta"></span>
+            </div>
+          </label>
+        </div>
+
+        <div class="proofread-box active" id="proofreadBox">
+          <label class="proofread-toggle">
+            <input type="checkbox" id="proofreadToggle" checked />
+            <span class="proofread-copy">
+              <strong>Proofread mode</strong>
+              <span id="proofreadCopy">Use stricter token, symbol, spacing, and formatting checks for DOCX versus HTML proofreading. This is the recommended mode when you want closer proofread-style comments against the webpage output.</span>
+            </span>
+          </label>
+        </div>
+
+        <div class="actions">
+          <button id="compareBtn" class="pill-button" disabled>Generate annotated PDF</button>
+          <button id="resetBtn" class="pill-button-secondary" type="button">Reset</button>
+        </div>
+
+        <div class="status" id="statusBox">Waiting for both files.</div>
+        <div class="fineprint">This redesign demo uses the same local compare endpoint as the current page. It is only a preview layer.</div>
+      </section>
+
+      <section class="results-panel">
+        <div class="results-empty" id="resultsEmpty">
+          <div>
+            <div class="section-label">Output surface</div>
+            <h2>No compare run yet</h2>
+            <p class="results-copy">Once both files are loaded, the generated PDF preview and compare metrics will appear here without changing the existing main page.</p>
+          </div>
+        </div>
+
+        <div class="results-body" id="resultsBody">
+          <div class="summary-head">
+            <div>
+              <div class="section-label">Generated output</div>
+              <h2>Review summary</h2>
+              <p class="results-copy" id="summaryLead">PDF created and ready for review.</p>
+            </div>
+            <div class="summary-actions">
+              <a id="downloadPdf" class="pill-button" href="#" download>Download PDF</a>
+              <a id="downloadSummary" class="pill-button-secondary" href="#" download>Download JSON</a>
+            </div>
+          </div>
+
+          <div class="metrics">
+            <div class="metric">
+              <div class="metric-label">Exact matches</div>
+              <div class="metric-value" id="metricExact">0</div>
+              <div class="metric-note">Blocks that match exactly after normalization.</div>
+            </div>
+            <div class="metric">
+              <div class="metric-label">Approx matches</div>
+              <div class="metric-value" id="metricApprox">0</div>
+              <div class="metric-note">Blocks matched with reviewable differences.</div>
+            </div>
+            <div class="metric">
+              <div class="metric-label" id="metricOnlyLabel">HTML / DOCX only</div>
+              <div class="metric-value" id="metricOnly">0 / 0</div>
+              <div class="metric-note">Unmatched content that remains unique to one side.</div>
+            </div>
+          </div>
+
+          <div class="meta-strip" id="metaStrip"></div>
+
+          <div class="preview-shell">
+            <div class="preview-topbar">
+              <span>embedded annotated pdf</span>
+              <span>local run preview</span>
+            </div>
+            <iframe id="pdfFrame" title="Generated annotated PDF preview"></iframe>
+          </div>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <script>
+    const state = {
+      docxFile: null,
+      targetFile: null,
+      mode: 'html',
+      proofread: true,
+      running: false,
+    };
+
+    const els = {
+      docxInput: document.getElementById('docxInput'),
+      targetInput: document.getElementById('targetInput'),
+      proofreadBox: document.getElementById('proofreadBox'),
+      proofreadToggle: document.getElementById('proofreadToggle'),
+      proofreadCopy: document.getElementById('proofreadCopy'),
+      docxZone: document.getElementById('docxZone'),
+      targetZone: document.getElementById('targetZone'),
+      docxChip: document.getElementById('docxChip'),
+      targetChip: document.getElementById('targetChip'),
+      docxName: document.getElementById('docxName'),
+      targetName: document.getElementById('targetName'),
+      docxMeta: document.getElementById('docxMeta'),
+      targetMeta: document.getElementById('targetMeta'),
+      targetTitle: document.getElementById('targetTitle'),
+      targetHelp: document.getElementById('targetHelp'),
+      targetGlyph: document.getElementById('targetGlyph'),
+      metricOnlyLabel: document.getElementById('metricOnlyLabel'),
+      panelSub: document.getElementById('panelSub'),
+      heroBody: document.getElementById('heroBody'),
+      modeHtml: document.getElementById('modeHtml'),
+      modePdf: document.getElementById('modePdf'),
+      compareBtn: document.getElementById('compareBtn'),
+      resetBtn: document.getElementById('resetBtn'),
+      statusBox: document.getElementById('statusBox'),
+      resultsEmpty: document.getElementById('resultsEmpty'),
+      resultsBody: document.getElementById('resultsBody'),
+      downloadPdf: document.getElementById('downloadPdf'),
+      downloadSummary: document.getElementById('downloadSummary'),
+      metricExact: document.getElementById('metricExact'),
+      metricApprox: document.getElementById('metricApprox'),
+      metricOnly: document.getElementById('metricOnly'),
+      metaStrip: document.getElementById('metaStrip'),
+      summaryLead: document.getElementById('summaryLead'),
+      pdfFrame: document.getElementById('pdfFrame'),
+      jumpCompareBtn: document.getElementById('jumpCompareBtn'),
+    };
+
+    const MODE_COPY = {
+      html: {
+        title: 'Saved webpage',
+        help: 'Drop the saved webpage file here. This gets rendered and annotated as the review PDF.',
+        glyph: 'HTML',
+        accept: '.html,.htm,text/html',
+        onlyLabel: 'HTML / DOCX only',
+        panelSub: 'Use one Word `.docx` file and one saved webpage `.html` or `.htm` file. The compare job runs locally on this machine.',
+        heroBody: 'This Figma-inspired redesign keeps the compare workflow local, but frames the interface as a high-contrast product demo with stricter structure and cleaner presentation.',
+        proofreadCopy: 'Use stricter token, symbol, spacing, and formatting checks for DOCX versus HTML proofreading. This is the recommended mode when you want closer proofread-style comments against the webpage output.',
+        ready: 'Ready to generate the annotated PDF.',
+        waiting: 'Waiting for both files.',
+        working: 'Generating annotated PDF from the saved webpage. This can take a few seconds on larger documents...',
+      },
+      pdf: {
+        title: 'Reference PDF',
+        help: 'Drop the PDF file here. The app compares it against the DOCX and embeds comments directly into a copied PDF output.',
+        glyph: 'PDF',
+        accept: '.pdf,application/pdf',
+        onlyLabel: 'PDF / DOCX only',
+        panelSub: 'Use one Word `.docx` file and one PDF file. The compare job runs locally on this machine and annotates the PDF itself.',
+        heroBody: 'This Figma-inspired redesign keeps the compare workflow local, but frames the DOCX versus PDF flow as a cleaner product-preview review surface while preserving the existing backend behavior.',
+        proofreadCopy: 'Use stricter token, symbol, spacing, grouped section, and structural fallback rules for DOCX versus PDF review. This is the recommended PDF proofread profile, but full visual formatting equivalence is still not guaranteed.',
+        ready: 'Ready to generate the annotated PDF.',
+        waiting: 'Waiting for both files.',
+        working: 'Generating annotated PDF from the source PDF. This can take a few seconds on larger documents...',
+      },
+    };
+
+    function fileMeta(file) {
+      const kb = (file.size / 1024).toFixed(1);
+      return `${kb} KB`;
+    }
+
+    function setStatus(message) {
+      els.statusBox.textContent = message;
+    }
+
+    function updateButtons() {
+      els.compareBtn.disabled = state.running || !(state.docxFile && state.targetFile);
+    }
+
+    function updateFileCard(kind, file) {
+      const isDocx = kind === 'docx';
+      const chip = isDocx ? els.docxChip : els.targetChip;
+      const name = isDocx ? els.docxName : els.targetName;
+      const meta = isDocx ? els.docxMeta : els.targetMeta;
+      if (!file) {
+        chip.classList.remove('active');
+        name.textContent = 'No file selected';
+        meta.textContent = '';
+        return;
+      }
+      chip.classList.add('active');
+      name.textContent = file.name;
+      meta.textContent = fileMeta(file);
+    }
+
+    function wireDropzone(zone, input, kind) {
+      ['dragenter', 'dragover'].forEach(type => {
+        zone.addEventListener(type, event => {
+          event.preventDefault();
+          zone.classList.add('dragover');
+        });
+      });
+      ['dragleave', 'drop'].forEach(type => {
+        zone.addEventListener(type, event => {
+          event.preventDefault();
+          zone.classList.remove('dragover');
+        });
+      });
+      zone.addEventListener('drop', event => {
+        const file = event.dataTransfer?.files?.[0];
+        if (!file) return;
+        if (kind === 'docx') {
+          state.docxFile = file;
+          updateFileCard('docx', file);
+        } else {
+          state.targetFile = file;
+          updateFileCard('target', file);
+        }
+        updateButtons();
+        setStatus(MODE_COPY[state.mode].ready);
+      });
+      input.addEventListener('change', event => {
+        const file = event.target.files?.[0] || null;
+        if (kind === 'docx') {
+          state.docxFile = file;
+          updateFileCard('docx', file);
+        } else {
+          state.targetFile = file;
+          updateFileCard('target', file);
+        }
+        updateButtons();
+        setStatus(file ? MODE_COPY[state.mode].ready : MODE_COPY[state.mode].waiting);
+      });
+    }
+
+    async function fileToBase64(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = String(reader.result || '');
+          resolve(result.split(',', 2)[1] || '');
+        };
+        reader.onerror = () => reject(reader.error || new Error('Failed to read file.'));
+        reader.readAsDataURL(file);
+      });
+    }
+
+    function compareApiUrl() {
+      if (window.location.protocol === 'file:') {
+        return 'http://127.0.0.1:8765/api/compare';
+      }
+      return `${window.location.origin}/api/compare`;
+    }
+
+    async function ensureServerReachable() {
+      const healthUrl = window.location.protocol === 'file:'
+        ? 'http://127.0.0.1:8765/api/health'
+        : `${window.location.origin}/api/health`;
+      try {
+        const response = await fetch(healthUrl, { cache: 'no-store' });
+        if (!response.ok) {
+          throw new Error(`Server health check failed with status ${response.status}.`);
+        }
+      } catch (_error) {
+        throw new Error('The local compare server is not reachable. Open http://127.0.0.1:8765 in your browser, or start the app with the launcher script first.');
+      }
+    }
+
+    function renderResults(payload) {
+      const summary = payload.summary;
+      const targetKind = (summary.target_kind || state.mode || 'html').toUpperCase();
+      const compareProfile = summary.compare_profile || (state.proofread ? 'proofread' : 'standard');
+      els.resultsEmpty.style.display = 'none';
+      els.resultsBody.classList.add('active');
+      els.summaryLead.textContent = `Renderer: ${summary.renderer}. Profile: ${compareProfile}. PDF created successfully.`;
+      els.metricExact.textContent = String(summary.exact_matches);
+      els.metricApprox.textContent = String(summary.approx_matches);
+      els.metricOnly.textContent = `${summary.html_only} / ${summary.docx_only}`;
+      els.metricOnlyLabel.textContent = `${targetKind} / DOCX only`;
+      els.metaStrip.textContent =
+        `${summary.docx_blocks} DOCX blocks, ${summary.html_blocks} ${targetKind} blocks. ` +
+        `${summary.docx_only} DOCX-only blocks and ${summary.html_only} ${targetKind}-only blocks stayed unmatched.` +
+        (summary.formatting_scope ? ` ${summary.formatting_scope}.` : '');
+      els.downloadPdf.href = payload.pdf_url;
+      els.downloadPdf.setAttribute('download', payload.output_name);
+      els.downloadSummary.href = payload.summary_url;
+      els.downloadSummary.setAttribute('download', 'comparison_summary.json');
+      els.pdfFrame.src = payload.pdf_url;
+    }
+
+    function applyMode(mode) {
+      state.mode = mode;
+      const copy = MODE_COPY[mode];
+      els.modeHtml.classList.toggle('active', mode === 'html');
+      els.modePdf.classList.toggle('active', mode === 'pdf');
+      els.targetTitle.textContent = copy.title;
+      els.targetHelp.textContent = copy.help;
+      els.targetGlyph.textContent = copy.glyph;
+      els.metricOnlyLabel.textContent = copy.onlyLabel;
+      els.panelSub.textContent = copy.panelSub;
+      els.heroBody.textContent = copy.heroBody;
+      els.targetInput.setAttribute('accept', copy.accept);
+      els.proofreadCopy.textContent = copy.proofreadCopy;
+      els.proofreadBox.classList.add('active');
+      state.targetFile = null;
+      els.targetInput.value = '';
+      updateFileCard('target', null);
+      updateButtons();
+      setStatus(copy.waiting);
+    }
+
+    async function runCompare() {
+      if (!(state.docxFile && state.targetFile) || state.running) return;
+      state.running = true;
+      updateButtons();
+      setStatus('Reading files and sending them to the local compare server...');
+      try {
+        await ensureServerReachable();
+        const [docxB64, targetB64] = await Promise.all([
+          fileToBase64(state.docxFile),
+          fileToBase64(state.targetFile),
+        ]);
+
+        setStatus(MODE_COPY[state.mode].working);
+        const response = await fetch(compareApiUrl(), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            mode: state.mode,
+            proofread: els.proofreadToggle.checked,
+            docx_name: state.docxFile.name,
+            target_name: state.targetFile.name,
+            docx_b64: docxB64,
+            target_b64: targetB64,
+          }),
+        });
+
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload.error || 'Compare failed.');
+        }
+
+        renderResults(payload);
+        setStatus('Done. Download the PDF or review it in the embedded preview.');
+      } catch (error) {
+        console.error(error);
+        setStatus(`Compare failed.\n\n${error.message || String(error)}`);
+      } finally {
+        state.running = false;
+        updateButtons();
+      }
+    }
+
+    function resetAll() {
+      state.docxFile = null;
+      state.targetFile = null;
+      state.running = false;
+      els.docxInput.value = '';
+      els.targetInput.value = '';
+      updateFileCard('docx', null);
+      updateFileCard('target', null);
+      updateButtons();
+      setStatus(MODE_COPY[state.mode].waiting);
+      els.resultsEmpty.style.display = 'grid';
+      els.resultsBody.classList.remove('active');
+      els.pdfFrame.removeAttribute('src');
+    }
+
+    wireDropzone(els.docxZone, els.docxInput, 'docx');
+    wireDropzone(els.targetZone, els.targetInput, 'target');
+    els.modeHtml.addEventListener('click', () => applyMode('html'));
+    els.modePdf.addEventListener('click', () => applyMode('pdf'));
+    els.proofreadToggle.addEventListener('change', () => {
+      state.proofread = els.proofreadToggle.checked;
+    });
+    els.compareBtn.addEventListener('click', runCompare);
+    els.resetBtn.addEventListener('click', resetAll);
+    els.jumpCompareBtn.addEventListener('click', () => {
+      document.getElementById('demo-flow').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+
+    applyMode('html');
+    if (window.location.protocol === 'file:') {
+      setStatus('This page was opened directly from disk. Use http://127.0.0.1:8765 or the launcher app so the compare server is available.');
+    }
+  </script>
+</body>
+</html>

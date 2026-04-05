@@ -16,6 +16,7 @@ from generate_diff_pdf import run_compare, run_compare_pdf
 
 ROOT = Path(__file__).resolve().parent
 INDEX_HTML = ROOT / "compare_ui.html"
+REDESIGN_DEMO_HTML = ROOT / "compare_ui_redesign_demo.html"
 RUNS_DIR = ROOT / "ui_runs"
 RUNS_DIR.mkdir(exist_ok=True)
 
@@ -37,6 +38,9 @@ class CompareHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/":
             self._serve_file(INDEX_HTML, "text/html; charset=utf-8")
+            return
+        if parsed.path == "/demo-redesign":
+            self._serve_file(REDESIGN_DEMO_HTML, "text/html; charset=utf-8")
             return
         if parsed.path == "/api/health":
             self._send_json({"ok": True})
