@@ -204,11 +204,53 @@ class SectionFamily:
     family_id: str
     source: str
     family_type: str
+    schema_key: str | None
     block_indices: list[int]
     key: str
     text: str
     order_start: int
     order_end: int
+
+
+@dataclass(frozen=True)
+class SectionSchema:
+    schema_key: str
+    family_type: str
+    patterns: tuple[str, ...]
+
+
+KNOWN_EARNINGS_SECTION_SCHEMAS = (
+    SectionSchema("results_summary", "results_summary", ("results summary",)),
+    SectionSchema("gaap_results", "gaap_results", ("gaap results",)),
+    SectionSchema("non_gaap_results", "non_gaap_results", ("non gaap results",)),
+    SectionSchema("business_segments", "business_segments", ("business segments",)),
+    SectionSchema("financial_targets", "financial_targets", ("financial targets",)),
+    SectionSchema("earnings_call_open_to_investors", "earnings_call", ("earnings call open to investors", "earnings call open to investor")),
+    SectionSchema("availability_of_final_financial_statements", "availability", ("availability of final financial statements",)),
+    SectionSchema("reconciliation_quarter_results", "reconciliation", (r"reconciliation of (?:first|second|third|fourth) quarter fiscal year \d{4} results",)),
+    SectionSchema("reconciliation_targets", "reconciliation", (r"reconciliation of \d{4} targets",)),
+    SectionSchema("forward_looking_statements", "forward_looking", ("forward looking statements",)),
+    SectionSchema(
+        "synopsys_income_statement",
+        "statement_table",
+        ("synopsys inc unaudited condensed consolidated statements of income",),
+    ),
+    SectionSchema(
+        "synopsys_balance_sheets",
+        "statement_table",
+        ("synopsys inc unaudited condensed consolidated balance sheets",),
+    ),
+    SectionSchema(
+        "synopsys_cash_flows",
+        "statement_table",
+        ("synopsys inc unaudited condensed consolidated statements of cash flows",),
+    ),
+    SectionSchema("segment_information", "segment_information", ("segment information",)),
+    SectionSchema("gaap_to_non_gaap_reconciliation", "gaap_to_non_gaap_reconciliation", ("gaap to non gaap reconciliation",)),
+    SectionSchema("about_synopsys", "about_synopsys", ("about synopsys",)),
+    SectionSchema("investor_contact", "investor_contact", ("investor contact",)),
+    SectionSchema("editorial_contact", "editorial_contact", ("editorial contact",)),
+)
 
 
 @dataclass
@@ -494,10 +536,68 @@ def section_family_key(text: str) -> str:
     return " ".join(tokenize(normalize_for_compare(text))[:18])
 
 
+def section_family_signature_text(blocks: list[Block], indices: list[int]) -> str:
+    parts: list[str] = []
+    for index in indices:
+        block = blocks[index]
+        if not visible_meaningful(block.text):
+            continue
+        if block.table_cell and block.structure_role == "table_data_cell":
+            continue
+        parts.append(block.text)
+    return "\n".join(parts)
+
+
 def extract_section_families(blocks: list[Block]) -> tuple[list[SectionFamily], dict[int, str]]:
     families: list[SectionFamily] = []
     block_to_family: dict[int, str] = {}
     used_indices: set[int] = set()
+
+    known_header_indices = {
+        index
+        for index, block in enumerate(blocks)
+        if not block.table_cell and block.kind != "footnote" and known_section_header(block.text)
+    }
+
+    for index, block in enumerate(blocks):
+        if index in used_indices or block.table_cell or block.kind == "footnote":
+            continue
+        schema = known_section_schema(block.text, allow_fuzzy=True)
+        if schema is None:
+            continue
+        family_indices: list[int] = [index]
+        probe = index + 1
+        while probe < len(blocks):
+            candidate = blocks[probe]
+            if probe in known_header_indices and probe != index:
+                break
+            if candidate.kind == "footnote":
+                probe += 1
+                continue
+            if not candidate.table_cell:
+                family_indices.append(probe)
+            probe += 1
+        family_indices = sorted(set(family_indices), key=lambda idx: blocks[idx].order)
+        text = section_family_text(blocks, family_indices)
+        signature_text = section_family_signature_text(blocks, family_indices)
+        if not visible_meaningful(signature_text):
+            used_indices.add(index)
+            continue
+        section = SectionFamily(
+            family_id=f"{block.source}-section-schema-{schema.schema_key}-{index}",
+            source=block.source,
+            family_type=schema.family_type,
+            schema_key=schema.schema_key,
+            block_indices=family_indices,
+            key=schema.schema_key,
+            text=text,
+            order_start=blocks[family_indices[0]].order,
+            order_end=blocks[family_indices[-1]].order,
+        )
+        families.append(section)
+        for family_index in family_indices:
+            block_to_family[family_index] = section.family_id
+            used_indices.add(family_index)
 
     table_families = extract_table_families(blocks)
     for table_idx, family in sorted(table_families.items()):
@@ -517,6 +617,7 @@ def extract_section_families(blocks: list[Block]) -> tuple[list[SectionFamily], 
             family_id=f"{blocks[indices[0]].source}-section-reconciliation-{table_idx}",
             source=blocks[indices[0]].source,
             family_type="reconciliation",
+            schema_key=None,
             block_indices=indices,
             key=section_family_key(text),
             text=text,
@@ -562,6 +663,7 @@ def extract_section_families(blocks: list[Block]) -> tuple[list[SectionFamily], 
             family_id=f"{block.source}-section-narrative-{index}",
             source=block.source,
             family_type="narrative",
+            schema_key=None,
             block_indices=family_indices,
             key=section_family_key(text),
             text=text,
@@ -577,6 +679,10 @@ def extract_section_families(blocks: list[Block]) -> tuple[list[SectionFamily], 
 
 
 def section_family_similarity(doc_family: SectionFamily, target_family: SectionFamily) -> float:
+    if doc_family.schema_key and target_family.schema_key:
+        if doc_family.schema_key == target_family.schema_key:
+            return 1.0
+        return 0.0
     if doc_family.family_type != target_family.family_type:
         return 0.0
     key_score = similarity(doc_family.key, target_family.key)
@@ -1063,6 +1169,24 @@ def match_confidence_tier(
     target_name: str,
 ) -> str:
     proofread_target = target_name in {"html", "pdf"}
+    doc_schema = known_section_schema(doc_block.text, allow_fuzzy=True)
+    target_schema = known_section_schema(target_block.text, allow_fuzzy=True)
+    if (
+        doc_block.structure_role == "section_header"
+        and target_block.structure_role == "section_header"
+        and doc_schema is not None
+        and target_schema is not None
+        and doc_schema.schema_key == target_schema.schema_key
+        and max(len(doc_block.normalized), len(target_block.normalized)) <= 48
+    ):
+        if exact_like_match_type(match_type):
+            return "strong"
+        header_similarity = difflib.SequenceMatcher(None, doc_block.normalized, target_block.normalized).ratio()
+        if header_similarity >= 0.88 and score >= 0.6:
+            return "strong"
+        if header_similarity >= 0.8 and score >= 0.52:
+            return "medium"
+        return "weak"
     if doc_block.structure_role == "section_lead" and target_block.structure_role == "section_lead":
         if exact_like_match_type(match_type):
             return "strong"
@@ -1157,6 +1281,34 @@ def match_confidence_tier(
     return "weak"
 
 
+def allow_precise_schema_header_diffs(
+    doc_block: Block,
+    target_block: Block,
+    *,
+    score: float,
+    match_type: str,
+) -> bool:
+    if not (
+        doc_block.structure_role == "section_header"
+        and target_block.structure_role == "section_header"
+    ):
+        return False
+    doc_schema = known_section_schema(doc_block.text, allow_fuzzy=True)
+    target_schema = known_section_schema(target_block.text, allow_fuzzy=True)
+    if (
+        doc_schema is None
+        or target_schema is None
+        or doc_schema.schema_key != target_schema.schema_key
+    ):
+        return False
+    if max(len(doc_block.normalized), len(target_block.normalized)) > 64:
+        return False
+    if exact_like_match_type(match_type):
+        return True
+    header_similarity = difflib.SequenceMatcher(None, doc_block.normalized, target_block.normalized).ratio()
+    return header_similarity >= 0.8 and score >= 0.52
+
+
 def next_narrative_neighbor(blocks: list[Block], start_index: int) -> Block | None:
     for probe in range(start_index + 1, len(blocks)):
         candidate = blocks[probe]
@@ -1191,6 +1343,22 @@ def promote_exact_structural_match(
         if target_value and normalize_proof_text(doc_value) == normalize_proof_text(target_value):
             return "exact_structural"
         return match_type
+    doc_schema = known_section_schema(doc_block.text, allow_fuzzy=True)
+    target_schema = known_section_schema(target_block.text, allow_fuzzy=True)
+    if (
+        doc_block.structure_role == "section_header"
+        and target_block.structure_role == "section_header"
+        and doc_schema is not None
+        and target_schema is not None
+        and doc_schema.schema_key == target_schema.schema_key
+    ):
+        if score >= 0.78:
+            next_doc = next_narrative_neighbor(doc_blocks, doc_index)
+            next_target = next_narrative_neighbor(target_blocks, target_index)
+            if next_doc is None or next_target is None:
+                return "exact_structural"
+            if similarity(next_doc.normalized, next_target.normalized) >= 0.82:
+                return "exact_structural"
     if doc_block.structure_role == "section_lead" and target_block.structure_role == "section_lead":
         if score < 0.78:
             return match_type
@@ -1691,10 +1859,23 @@ def assign_structural_roles(blocks: list[Block]) -> list[Block]:
         )
         text = normalize_text(block.text).strip()
         token_count = len(diff_tokens(text))
-        if upcoming_table:
+        schema = known_section_schema(text, allow_fuzzy=True)
+        if schema is not None:
+            block.structure_role = "section_header"
+        elif upcoming_table:
+            prev_schema = known_section_schema(prev_block.text, allow_fuzzy=True) if prev_block is not None else None
+            if (
+                prev_schema is not None
+                and prev_block is not None
+                and prev_block.structure_role == "section_header"
+                and token_count > 14
+                and not text.startswith("(")
+            ):
+                block.structure_role = "paragraph"
+                continue
             if text.startswith("(") or (block.italic and token_count <= 20):
                 block.structure_role = "table_subtitle"
-            elif block.heading or block.bold or token_count <= 14:
+            elif block.heading or token_count <= 14 or (block.bold and token_count <= 14):
                 block.structure_role = "table_title"
             if block.structure_role in {"table_title", "table_subtitle"}:
                 block.family_table_index = upcoming_table_index
@@ -1771,6 +1952,41 @@ def normalize_without_punctuation(text: str) -> str:
     cleaned = normalize_for_compare(strip_leading_markers(text))
     cleaned = re.sub(r"[^0-9a-z]+", " ", cleaned)
     return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def known_section_schema(text: str, *, allow_fuzzy: bool = False) -> SectionSchema | None:
+    normalized = normalize_without_punctuation(text)
+    if not normalized:
+        return None
+    for schema in KNOWN_EARNINGS_SECTION_SCHEMAS:
+        for pattern in schema.patterns:
+            if pattern == normalized:
+                return schema
+            if re.fullmatch(pattern, normalized):
+                return schema
+    if allow_fuzzy:
+        tokens = tokenize(normalized)
+        if 0 < len(tokens) <= 8 and len(normalized) <= 96:
+            best_schema: SectionSchema | None = None
+            best_score = 0.0
+            for schema in KNOWN_EARNINGS_SECTION_SCHEMAS:
+                for pattern in schema.patterns:
+                    if re.search(r"[().?:|+*\\\[\]{}]", pattern):
+                        continue
+                    pattern_tokens = tokenize(pattern)
+                    if len(pattern_tokens) != len(tokens):
+                        continue
+                    score = sum(difflib.SequenceMatcher(None, left, right).ratio() for left, right in zip(tokens, pattern_tokens)) / max(len(tokens), 1)
+                    if score > best_score:
+                        best_score = score
+                        best_schema = schema
+            if best_schema is not None and best_score >= 0.9:
+                return best_schema
+    return None
+
+
+def known_section_header(text: str) -> bool:
+    return known_section_schema(text, allow_fuzzy=True) is not None
 
 
 def normalize_without_footnote_refs(text: str) -> str:
@@ -5244,6 +5460,19 @@ def compare_blocks(
                 best_score = score
                 best_index = html_index
         approx_floor = 0.73 if target_name == "html" else 0.78 if proofread_mode and target_name == "pdf" else 0.74
+        doc_schema = known_section_schema(doc_block.text, allow_fuzzy=True)
+        if (
+            doc_block.structure_role == "section_header"
+            and best_index is not None
+            and html_blocks[best_index].structure_role == "section_header"
+        ):
+            target_schema = known_section_schema(html_blocks[best_index].text, allow_fuzzy=True)
+            if (
+                doc_schema is not None
+                and target_schema is not None
+                and doc_schema.schema_key == target_schema.schema_key
+            ):
+                approx_floor = min(approx_floor, 0.6)
         if best_index is not None and best_score >= approx_floor:
             used_html.add(best_index)
             matches.append(
@@ -5410,6 +5639,18 @@ def date_phrase_for_token(text: str, token: DiffToken) -> str | None:
     return None
 
 
+def date_phrase_for_token_slice(text: str, tokens: list[DiffToken]) -> str | None:
+    if not tokens:
+        return None
+    source = normalize_proof_text(text)
+    start = min(token.start for token in tokens)
+    end = max(token.end for token in tokens)
+    for match in DATE_PHRASE_RE.finditer(source):
+        if start >= match.start() and end <= match.end():
+            return match.group(0)
+    return None
+
+
 def contextual_replacement_comment(
     doc_text: str,
     target_text: str,
@@ -5423,6 +5664,23 @@ def contextual_replacement_comment(
     if doc_date and target_date and normalize_for_compare(doc_date) != normalize_for_compare(target_date):
         return f"The date is different, {target_date} in {target_name} while {doc_date} in word."
     return replacement_comment(doc_token, target_token, target_name=target_name)
+
+
+def block_date_difference_comment(
+    doc_text: str,
+    target_text: str,
+    *,
+    target_name: str,
+) -> str | None:
+    doc_dates = [match.group(0) for match in DATE_PHRASE_RE.finditer(normalize_proof_text(doc_text))]
+    target_dates = [match.group(0) for match in DATE_PHRASE_RE.finditer(normalize_proof_text(target_text))]
+    if len(doc_dates) != 1 or len(target_dates) != 1:
+        return None
+    doc_date = doc_dates[0]
+    target_date = target_dates[0]
+    if normalize_for_compare(doc_date) == normalize_for_compare(target_date):
+        return None
+    return f"The date is different, {target_date} in {target_name} while {doc_date} in word."
 
 
 def comment_token_text(token: DiffToken) -> str:
@@ -5646,6 +5904,21 @@ def append_word_level_comments(
     target_start: int,
     target_name: str,
 ) -> None:
+    doc_date = date_phrase_for_token_slice(doc_text, doc_slice)
+    target_date = date_phrase_for_token_slice(target_text, target_slice)
+    if (
+        doc_date
+        and target_date
+        and normalize_for_compare(doc_date) != normalize_for_compare(target_date)
+    ):
+        comments.append(
+            HtmlComment(
+                order=order,
+                contents=f"The date is different, {target_date} in {target_name} while {doc_date} in word.",
+                token_index=target_start,
+            )
+        )
+        return
     pair_count = min(len(doc_slice), len(target_slice))
     for offset in range(pair_count):
         doc_token = doc_slice[offset]
@@ -6210,6 +6483,12 @@ def text_difference_comments(
         grouped_match_type=grouped_match_type,
         target_name=target_name,
     )
+    precise_schema_header = allow_precise_schema_header_diffs(
+        compare_doc_block,
+        compare_target_block,
+        score=score,
+        match_type=match_type,
+    )
     narrative_like = target_name in {"html", "pdf"} and long_narrative_block(compare_doc_block) and long_narrative_block(compare_target_block)
     formatting_allowed = not (
         proofread_mode
@@ -6217,7 +6496,8 @@ def text_difference_comments(
         and formatting_diffs
         and not exact_like_match_type(match_type)
         and score < (0.92 if target_name == "html" else 0.95)
-    ) and confidence_tier == "strong" and not (target_name == "pdf" and target_focus_applied)
+        and not precise_schema_header
+    ) and (confidence_tier == "strong" or precise_schema_header) and not (target_name == "pdf" and target_focus_applied)
     formatting_comments = [
         HtmlComment(
             order=target_block.order,
@@ -6257,6 +6537,19 @@ def text_difference_comments(
     )
     if numeric_comment is not None:
         return [numeric_comment]
+    block_date_comment = block_date_difference_comment(
+        compare_doc_block.text,
+        compare_target_block.text,
+        target_name=target_name,
+    )
+    if block_date_comment is not None:
+        return [
+            HtmlComment(
+                order=compare_target_block.order,
+                contents=block_date_comment,
+                token_index=0 if diff_tokens(compare_target_block.text) else None,
+            )
+        ]
     single_token_comments = single_token_target_comments(
         compare_doc_block,
         compare_target_block,
@@ -6388,6 +6681,19 @@ def text_difference_comments(
     comments = dedupe_html_comments(comments)
 
     if comments:
+        high_signal_comments = [
+            comment for comment in comments
+            if (
+                comment.contents.startswith("The date is different")
+                or comment.contents.startswith("The number is different")
+                or comment.contents.startswith("The currency symbol is different")
+                or comment.contents.startswith("The percent sign is different")
+                or comment.contents.startswith("The symbol is different")
+            )
+        ]
+        if precise_schema_header and formatting_comments:
+            comments.extend(formatting_comments)
+            comments = dedupe_html_comments(comments)
         if grouped_match_type == "quote":
             return [
                 HtmlComment(
@@ -6396,7 +6702,9 @@ def text_difference_comments(
                     token_index=0 if target_tokens else None,
                 )
             ]
-        if confidence_tier == "medium":
+        if confidence_tier == "medium" and not precise_schema_header:
+            if high_signal_comments:
+                return dedupe_html_comments(high_signal_comments + formatting_comments)
             return [
                 HtmlComment(
                     order=target_block.order,
