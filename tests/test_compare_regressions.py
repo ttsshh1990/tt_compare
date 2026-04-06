@@ -818,8 +818,8 @@ class CompareHelperTests(unittest.TestCase):
                 id="b0",
                 source="docx",
                 order=0,
-                text="GAAP to Non-GAAP Reconciliation",
-                normalized=g.normalize_for_compare("GAAP to Non-GAAP Reconciliation"),
+                text="Quarterly Tax Bridge",
+                normalized=g.normalize_for_compare("Quarterly Tax Bridge"),
                 bold=True,
                 kind="p",
             ),
@@ -871,8 +871,296 @@ class CompareHelperTests(unittest.TestCase):
             ),
         ]
         g.assign_structural_roles(blocks)
-        self.assertEqual(blocks[0].structure_role, "section_lead")
+        self.assertEqual(blocks[0].structure_role, "section_header")
         self.assertEqual(blocks[1].structure_role, "paragraph")
+
+    def test_known_section_schema_matches_stable_earnings_headers(self) -> None:
+        self.assertEqual(g.known_section_schema("Financial Targets").schema_key, "financial_targets")
+        self.assertEqual(
+            g.known_section_schema("Reconciliation of Third Quarter Fiscal Year 2025 Results").schema_key,
+            "reconciliation_quarter_results",
+        )
+        self.assertEqual(
+            g.known_section_schema("SYNOPSYS, INC. Unaudited Condensed Consolidated Statements of Cash Flows").schema_key,
+            "synopsys_cash_flows",
+        )
+        self.assertEqual(g.known_section_schema("Financial Targetss", allow_fuzzy=True).schema_key, "financial_targets")
+
+    def test_assign_structural_roles_uses_known_section_header_before_table_title_heuristics(self) -> None:
+        blocks = [
+            g.Block(
+                id="b0",
+                source="docx",
+                order=0,
+                text="Financial Targets",
+                normalized=g.normalize_for_compare("Financial Targets"),
+                bold=True,
+                kind="p",
+            ),
+            g.Block(
+                id="b1",
+                source="docx",
+                order=1,
+                text="Synopsys also provided its consolidated financial targets for the second quarter and full fiscal year 2026.",
+                normalized=g.normalize_for_compare("Synopsys also provided its consolidated financial targets for the second quarter and full fiscal year 2026."),
+                kind="p",
+            ),
+            g.Block(
+                id="b2",
+                source="docx",
+                order=2,
+                text="Low",
+                normalized=g.normalize_for_compare("Low"),
+                table_cell=True,
+                kind="td",
+                table_pos=(0, 0, 0),
+                row_slot=0,
+            ),
+        ]
+        g.assign_structural_roles(blocks)
+        self.assertEqual(blocks[0].structure_role, "section_header")
+        self.assertEqual(blocks[1].structure_role, "paragraph")
+
+    def test_extract_section_families_groups_known_schema_until_next_known_header(self) -> None:
+        blocks = [
+            g.Block(
+                id="b0",
+                source="docx",
+                order=0,
+                text="Financial Targets",
+                normalized=g.normalize_for_compare("Financial Targets"),
+                bold=True,
+                kind="p",
+                structure_role="section_header",
+            ),
+            g.Block(
+                id="b1",
+                source="docx",
+                order=1,
+                text="Synopsys also provided its consolidated financial targets for the second quarter and full fiscal year 2026.",
+                normalized=g.normalize_for_compare("Synopsys also provided its consolidated financial targets for the second quarter and full fiscal year 2026."),
+                kind="p",
+                structure_role="paragraph",
+            ),
+            g.Block(
+                id="b2",
+                source="docx",
+                order=2,
+                text="2,020",
+                normalized=g.normalize_for_compare("2,020"),
+                table_cell=True,
+                kind="td",
+                table_pos=(0, 1, 1),
+                structure_role="table_data_cell",
+            ),
+            g.Block(
+                id="b3",
+                source="docx",
+                order=3,
+                text="Earnings Call Open to Investors",
+                normalized=g.normalize_for_compare("Earnings Call Open to Investors"),
+                bold=True,
+                kind="p",
+                structure_role="section_header",
+            ),
+        ]
+        families, block_to_family = g.extract_section_families(blocks)
+        financial_family = next(f for f in families if f.schema_key == "financial_targets")
+        self.assertEqual(financial_family.family_type, "financial_targets")
+        self.assertEqual(financial_family.block_indices, [0, 1])
+        self.assertIn(0, block_to_family)
+        self.assertIn(1, block_to_family)
+        self.assertNotIn(2, block_to_family)
+
+    def test_match_section_families_prefers_known_schema_alignment(self) -> None:
+        doc_blocks = [
+            g.Block(
+                id="d0",
+                source="docx",
+                order=0,
+                text="About Synopsys",
+                normalized=g.normalize_for_compare("About Synopsys"),
+                kind="p",
+                bold=True,
+                structure_role="section_header",
+            ),
+            g.Block(
+                id="d1",
+                source="docx",
+                order=1,
+                text="Synopsys is a leader in silicon to systems design solutions.",
+                normalized=g.normalize_for_compare("Synopsys is a leader in silicon to systems design solutions."),
+                kind="p",
+                structure_role="paragraph",
+            ),
+        ]
+        html_blocks = [
+            g.Block(
+                id="h0",
+                source="html",
+                order=0,
+                text="About Synopsys",
+                normalized=g.normalize_for_compare("About Synopsys"),
+                kind="p",
+                bold=True,
+                structure_role="section_header",
+            ),
+            g.Block(
+                id="h1",
+                source="html",
+                order=1,
+                text="Synopsys delivers trusted silicon to systems design solutions.",
+                normalized=g.normalize_for_compare("Synopsys delivers trusted silicon to systems design solutions."),
+                kind="p",
+                structure_role="paragraph",
+            ),
+        ]
+        matches, _doc_map, _target_map, doc_family_map, target_family_map = g.match_section_families(doc_blocks, html_blocks)
+        self.assertEqual(len(matches), 1)
+        doc_family_id, target_family_id = next(iter(matches.items()))
+        self.assertEqual(doc_family_map[doc_family_id].schema_key, "about_synopsys")
+        self.assertEqual(target_family_map[target_family_id].schema_key, "about_synopsys")
+
+    def test_compare_blocks_matches_same_schema_section_header_typo(self) -> None:
+        doc_blocks = [
+            g.Block(
+                id="d0",
+                source="docx",
+                order=0,
+                text="Financial Targetss",
+                normalized=g.normalize_for_compare("Financial Targetss"),
+                kind="p",
+                bold=True,
+            ),
+        ]
+        html_blocks = [
+            g.Block(
+                id="h0",
+                source="html",
+                order=0,
+                text="Financial Targets",
+                normalized=g.normalize_for_compare("Financial Targets"),
+                kind="p",
+                bold=True,
+            ),
+        ]
+        g.assign_structural_roles(doc_blocks)
+        g.assign_structural_roles(html_blocks)
+        matches, docx_only, html_only = g.compare_blocks(doc_blocks, html_blocks)
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(docx_only, [])
+        self.assertEqual(html_only, [])
+        self.assertEqual(matches[0].html_index, 0)
+
+    def test_same_schema_section_header_typo_emits_word_diff(self) -> None:
+        doc = g.Block(
+            id="d0",
+            source="docx",
+            order=0,
+            text="Financial Targetss",
+            normalized=g.normalize_for_compare("Financial Targetss"),
+            kind="p",
+            bold=True,
+            structure_role="section_header",
+        )
+        html = g.Block(
+            id="h0",
+            source="html",
+            order=0,
+            text="Financial Targets",
+            normalized=g.normalize_for_compare("Financial Targets"),
+            kind="p",
+            bold=True,
+            structure_role="section_header",
+        )
+        comments = g.text_difference_comments(
+            doc,
+            html,
+            0.6470430107526881,
+            target_name="html",
+            docx_blocks=[doc],
+            target_blocks=[html],
+            match_type="approx",
+            proofread_mode=True,
+        )
+        self.assertTrue(comments)
+        self.assertIn("The word is different", comments[0].contents)
+
+    def test_same_schema_section_header_medium_confidence_keeps_formatting_detail(self) -> None:
+        doc = g.Block(
+            id="d0",
+            source="docx",
+            order=0,
+            text="Financial Targetss",
+            normalized=g.normalize_for_compare("Financial Targetss"),
+            kind="p",
+            bold=True,
+            structure_role="section_header",
+            runs=[g.InlineRun(text="Financial Targetss", kind="text", bold=True, italic=True)],
+        )
+        html = g.Block(
+            id="h0",
+            source="html",
+            order=0,
+            text="Financial Targets",
+            normalized=g.normalize_for_compare("Financial Targets"),
+            kind="p",
+            bold=True,
+            structure_role="section_header",
+            runs=[g.InlineRun(text="Financial Targets", kind="text", bold=True, italic=False)],
+        )
+        comments = g.text_difference_comments(
+            doc,
+            html,
+            0.6470430107526881,
+            target_name="html",
+            docx_blocks=[doc],
+            target_blocks=[html],
+            match_type="approx",
+            formatting_diffs=['DOCX has italic on "Financial"; HTML does not.'],
+            proofread_mode=True,
+        )
+        self.assertTrue(any("The word is different" in comment.contents for comment in comments))
+        self.assertTrue(any("Formatting differs:" in comment.contents for comment in comments))
+
+    def test_medium_confidence_paragraph_keeps_exact_date_difference(self) -> None:
+        doc_text = (
+            "Synopsys will include final financial statements for the first quarter of fiscal year 2026 "
+            "in its quarterly report on Form 10-Q to be filed on or before March 13, 2026."
+        )
+        html_text = (
+            "Synopsys will include final financial statements for the first quarter of fiscal year 2026 "
+            "in its quarterly report on Form 10-Q to be filed on or before March 12, 2026."
+        )
+        doc = g.Block(
+            id="d0",
+            source="docx",
+            order=0,
+            text=doc_text,
+            normalized=g.normalize_for_compare(doc_text),
+            kind="p",
+            structure_role="paragraph",
+        )
+        html = g.Block(
+            id="h0",
+            source="html",
+            order=0,
+            text=html_text,
+            normalized=g.normalize_for_compare(html_text),
+            kind="p",
+            structure_role="paragraph",
+        )
+        comments = g.text_difference_comments(
+            doc,
+            html,
+            0.9615942028985508,
+            target_name="html",
+            docx_blocks=[doc],
+            target_blocks=[html],
+            match_type="approx",
+            proofread_mode=True,
+        )
+        self.assertTrue(any(comment.contents.startswith("The date is different") for comment in comments))
 
     def test_assign_structural_roles_marks_column_headers_and_data_rows(self) -> None:
         blocks = [

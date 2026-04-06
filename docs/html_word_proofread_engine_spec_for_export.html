@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<title>HTML vs Word Proofread Engine Spec</title>
+<style>
+body{font-family: Georgia, serif; margin:48px; line-height:1.45; color:#111;}
+h1{font-size:24pt; margin:0 0 18px 0;}
+h2{font-size:16pt; margin:22px 0 10px 0;}
+h3{font-size:13pt; margin:16px 0 8px 0;}
+p{margin:0 0 10px 0;}
+ul{margin:0 0 12px 22px;}
+li{margin:0 0 6px 0;}
+code{font-family: Menlo, monospace; font-size: 9pt;}
+</style></head><body>
+<h1>HTML vs Word Proofread Engine Spec</h1>
+<h2>Purpose</h2>
+<p>Define the product requirements, comparison policy, architecture, and future hardening plan for the `DOCX vs HTML` proofreading engine.</p>
+<p>This document is for the `Word -&gt; HTML` workflow only. It is the strongest comparison path in this project and the primary path that should be treated as the proofreading baseline.</p>
+<h2>Product Goal</h2>
+<p>The engine should behave like a proofreader, not a generic text diff.</p>
+<p>That means it must:</p>
+<ul>
+<li>match the correct corresponding content before diffing</li>
+<li>catch real proofreading differences</li>
+<li>avoid false positives from weak or ambiguous matches</li>
+<li>explain broad structural mismatches clearly instead of pretending they are exact text differences</li>
+<li>remain stable across future earnings-release style documents</li>
+</ul>
+<h2>Scope</h2>
+<h3>In Scope</h3>
+<ul>
+<li>`DOCX vs HTML` comparison</li>
+<li>narrative paragraphs</li>
+<li>section headers and lead lines</li>
+<li>table titles and subtitles</li>
+<li>table column headers</li>
+<li>table row labels</li>
+<li>table data cells</li>
+<li>quote blocks</li>
+<li>contact blocks</li>
+<li>footnotes</li>
+<li>reconciliation sections</li>
+<li>long narrative/disclosure sections</li>
+<li>formatting comparison where span-level alignment is strong enough</li>
+</ul>
+<h3>Out of Scope</h3>
+<ul>
+<li>`DOCX vs PDF` parity with HTML behavior</li>
+<li>pixel-perfect visual comparison</li>
+<li>arbitrary layout/CSS rendering fidelity</li>
+<li>guaranteed formatting accuracy when source structure is ambiguous</li>
+</ul>
+<h2>Core Requirements</h2>
+<h3>1. Structure-First Matching</h3>
+<p>The engine must match corresponding content structurally before generating proofreading comments.</p>
+<p>Matching must be aware of:</p>
+<ul>
+<li>section families</li>
+<li>table families</li>
+<li>header/title families</li>
+<li>grouped quote/contact/footnote families</li>
+<li>row lineage within aligned tables</li>
+</ul>
+<h3>2. Proofread-Level Difference Detection</h3>
+<p>The engine must catch real differences in:</p>
+<ul>
+<li>words</li>
+<li>numbers</li>
+<li>dates</li>
+<li>currency symbols</li>
+<li>percent signs</li>
+<li>punctuation</li>
+<li>meaningful spacing</li>
+<li>bold / italic / underline where visually relevant and span alignment is strong</li>
+</ul>
+<h3>3. False-Positive Suppression</h3>
+<p>The engine must suppress comments when the match is weak or ambiguous.</p>
+<p>Common false-positive sources to avoid:</p>
+<ul>
+<li>wrong block pairing</li>
+<li>repeated short labels</li>
+<li>layout-only HTML spacing</li>
+<li>merged HTML blocks vs split Word blocks</li>
+<li>block-level formatting leakage from mixed-format paragraphs</li>
+<li>unmatched quote/contact/footnote spillover</li>
+</ul>
+<h3>4. Broad Structural Visibility</h3>
+<p>When the engine can identify a corresponding section family but cannot align it cleanly block-by-block, it should emit a structural summary instead of noisy low-confidence token comments.</p>
+<h3>5. Reusability</h3>
+<p>Behavior must be driven by durable comparison logic, not by one-off patches for specific documents.</p>
+<h2>Comparison Policy</h2>
+<h3>Matching Policy</h3>
+<ul>
+<li>Prefer exact structural matches where role, family, order, and local context agree.</li>
+<li>Allow broad structural matches when section identity is clear but fine-grained alignment is weak.</li>
+<li>Suppress detailed comments when correspondence is not defensible.</li>
+</ul>
+<h3>Text Policy</h3>
+<ul>
+<li>Show precise word-level differences when the match is strong.</li>
+<li>Show number/date/symbol differences when cell/span correspondence is strong.</li>
+<li>Do not emit generic paragraph-difference comments for table values when only layout spacing differs.</li>
+</ul>
+<h3>Spacing Policy</h3>
+<ul>
+<li>Meaningful spacing in prose can be reported.</li>
+<li>Layout-only spacing inside HTML tables should be suppressed.</li>
+<li>Mixed token + spacing comparison is allowed only after the correct pair is matched.</li>
+</ul>
+<h3>Formatting Policy</h3>
+<ul>
+<li>Compare formatting at run/span level, not whole-block level, where possible.</li>
+<li>Compare only the matched text span, not unrelated styled descendants.</li>
+<li>Be conservative when formatting alignment is weak.</li>
+</ul>
+<h3>Summary Policy</h3>
+<ul>
+<li>Long rewritten quote/footnote/narrative families may use summary comments instead of many token comments.</li>
+<li>Summary comments must say whether the difference is:</li>
+</ul>
+<p>  - high-confidence textual drift</p>
+<p>  - broad structural match</p>
+<p>  - normalized-text-equivalent but structurally non-exact</p>
+<h2>Structural Model</h2>
+<p>The engine should classify extracted content into typed roles instead of using one generic block type.</p>
+<p>Current target roles:</p>
+<ul>
+<li>`paragraph`</li>
+<li>`section_header`</li>
+<li>`section_lead`</li>
+<li>`table_title`</li>
+<li>`table_subtitle`</li>
+<li>`table_column_header`</li>
+<li>`table_row_label`</li>
+<li>`table_data_label`</li>
+<li>`table_data_cell`</li>
+<li>`quote`</li>
+<li>`contact`</li>
+<li>`footnote`</li>
+<li>`reconciliation_family`</li>
+<li>`narrative_family`</li>
+</ul>
+<h2>Current Architecture</h2>
+<h3>Extraction</h3>
+<p>The engine extracts ordered runs/spans instead of flattening content too early.</p>
+<p>Each block may retain:</p>
+<ul>
+<li>raw text</li>
+<li>proof text</li>
+<li>match text</li>
+<li>inline runs</li>
+<li>formatting signals</li>
+<li>structural role</li>
+<li>table/family metadata</li>
+</ul>
+<h3>Matching</h3>
+<p>The engine currently uses:</p>
+<ul>
+<li>table-family alignment before row/cell matching</li>
+<li>header/title family matching</li>
+<li>row-label lineage in aligned tables</li>
+<li>grouped matching for quote/contact/footnote sections</li>
+<li>family-aware matching for reconciliation and long narrative sections</li>
+<li>repeated-label disambiguation</li>
+</ul>
+<h3>Comment Emission</h3>
+<p>The engine uses confidence-aware output:</p>
+<ul>
+<li>`High Confidence | Critical`</li>
+<li>`Medium Confidence | Text`</li>
+<li>`Medium Confidence | Formatting`</li>
+<li>`Medium Confidence | Structural`</li>
+<li>`Medium Confidence | Info`</li>
+</ul>
+<p>Detailed comments should only be emitted when the match is strong enough.</p>
+<h2>Known Good Behaviors</h2>
+<p>The `DOCX vs HTML` engine should currently support:</p>
+<ul>
+<li>matching tables by family before comparing repeated row names</li>
+<li>catching short header typos like `Targetss` vs `Targets`</li>
+<li>detecting word differences in short lead/header blocks such as `Investor` vs `Investors`</li>
+<li>keeping quote/contact/footnote/reconciliation sections visible as structural families</li>
+<li>suppressing layout-only table-spacing noise</li>
+<li>preventing repeated short labels from generating arbitrary false matches</li>
+</ul>
+<h2>Remaining Hardening Work</h2>
+<p>The engine is strong enough for real proofreading use, but not fully final for all future document layouts.</p>
+<p>Remaining work is mainly hardening, not redesign.</p>
+<h3>1. Regression Corpus Expansion</h3>
+<p>Build a larger reviewed corpus of real `DOCX vs HTML` pairs.</p>
+<p>Recommended target:</p>
+<ul>
+<li>10 to 20 real filing/release pairs</li>
+<li>both clean and messy structural cases</li>
+<li>expected valid comments documented</li>
+<li>expected suppressed comments documented</li>
+</ul>
+<h3>2. Document-Level Golden Tests</h3>
+<p>Add document-level regression tests, not only logic/unit tests.</p>
+<p>Each golden test should lock:</p>
+<ul>
+<li>reviewed JSON output</li>
+<li>expected high-confidence findings</li>
+<li>expected broad summaries</li>
+<li>expected suppressed noise classes</li>
+</ul>
+<h3>3. Header/Section Validation Across Layouts</h3>
+<p>Expand validation for:</p>
+<ul>
+<li>centered table titles</li>
+<li>merged header cells</li>
+<li>repeated section titles</li>
+<li>unusual HTML wrappers</li>
+<li>multi-line title/subtitle stacks</li>
+</ul>
+<h3>4. Formatting Confidence Refinement</h3>
+<p>Keep formatting comments conservative unless:</p>
+<ul>
+<li>span match is strong</li>
+<li>structure role is compatible</li>
+<li>local neighborhood is stable</li>
+</ul>
+<h3>5. Reviewer Workflow Controls</h3>
+<p>Add output filtering or reviewer modes such as:</p>
+<ul>
+<li>critical only</li>
+<li>critical + text</li>
+<li>all findings</li>
+</ul>
+<h2>Acceptance Criteria For “Final”</h2>
+<p>The `DOCX vs HTML` engine can be considered final only when:</p>
+<ul>
+<li>a reviewed regression corpus exists across multiple real document pairs</li>
+<li>document-level golden outputs are stable</li>
+<li>real number/date/symbol differences are consistently caught</li>
+<li>repeated-label/header noise remains suppressed across the corpus</li>
+<li>quote/contact/footnote/reconciliation families do not regress into orphan block noise</li>
+<li>formatting comments remain conservative and high-signal</li>
+</ul>
+<h2>Recommended Product Positioning</h2>
+<h3>Current Positioning</h3>
+<p>The `DOCX vs HTML` engine is now strong enough for real proofreading with human review.</p>
+<h3>Not Yet Safe To Claim</h3>
+<p>Do not claim that it is:</p>
+<ul>
+<li>perfect for every future filing layout</li>
+<li>pixel-accurate</li>
+<li>equal in reliability to a visual design-diff system</li>
+</ul>
+<h3>Best Internal Positioning</h3>
+<p>Treat it as:</p>
+<ul>
+<li>a structure-aware proofreading engine</li>
+<li>optimized for real Word-to-HTML release comparison</li>
+<li>confidence-driven rather than noise-maximizing</li>
+</ul>
+<h2>Next Practical Step</h2>
+<p>The next best step is not another logic patch.</p>
+<p>It is to create:</p>
+<ul>
+<li>a real reviewed regression corpus</li>
+<li>document-level golden tests</li>
+<li>a locked proofreading policy</li>
+</ul>
+<p>That is what will make the `DOCX vs HTML` workflow feel final for future documents.</p>
+</body></html>
