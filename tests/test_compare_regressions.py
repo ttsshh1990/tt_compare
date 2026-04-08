@@ -482,6 +482,42 @@ class CompareHelperTests(unittest.TestCase):
         summary = g.quote_diff_summary(text, text, target_name="html")
         self.assertTrue(summary.startswith("The CEO quote block is broadly matched rather than exactly matched."))
 
+    def test_same_normalized_quote_wording_suppresses_structural_comment(self) -> None:
+        doc = g.Block(
+            id="d0",
+            source="docx",
+            order=0,
+            text='"Synopsys enters 2026 with an expanded portfolio," said Sassine Ghazi, president and CEO of Synopsys.',
+            normalized=g.normalize_for_compare(
+                '"Synopsys enters 2026 with an expanded portfolio," said Sassine Ghazi, president and CEO of Synopsys.'
+            ),
+            kind="p",
+            structure_role="paragraph",
+        )
+        html = g.Block(
+            id="h0",
+            source="html",
+            order=0,
+            text='“Synopsys enters 2026 with an expanded portfolio,” said Sassine Ghazi, president and CEO of Synopsys.',
+            normalized=g.normalize_for_compare(
+                '“Synopsys enters 2026 with an expanded portfolio,” said Sassine Ghazi, president and CEO of Synopsys.'
+            ),
+            kind="p",
+            structure_role="paragraph",
+        )
+        comments = g.text_difference_comments(
+            doc,
+            html,
+            0.9,
+            target_name="html",
+            docx_blocks=[doc],
+            target_blocks=[html],
+            match_type="approx",
+            proofread_mode=True,
+            grouped_match_type="quote",
+        )
+        self.assertEqual(comments, [])
+
     def test_text_difference_comments_summarizes_medium_confidence_repeated_label(self) -> None:
         doc = g.Block(
             id="d0",
@@ -511,6 +547,252 @@ class CompareHelperTests(unittest.TestCase):
         )
         self.assertEqual(len(comments), 1)
         self.assertTrue(comments[0].contents.startswith("The paragraph text is different."))
+
+    def test_medium_confidence_html_narrative_keeps_clear_symbol_diff(self) -> None:
+        doc = g.Block(
+            id="d0",
+            source="docx",
+            order=0,
+            text=(
+                "SUNNYVALE, Calif. - Feb. 25, 2026 - Synopsys, Inc. (Nasdaq: SNPS) "
+                "today reported results for its first quarter of fiscal year 2026."
+            ),
+            normalized=g.normalize_for_compare(
+                "SUNNYVALE, Calif. - Feb. 25, 2026 - Synopsys, Inc. (Nasdaq: SNPS) today reported results for its first quarter of fiscal year 2026."
+            ),
+            kind="p",
+            structure_role="paragraph",
+        )
+        html = g.Block(
+            id="h0",
+            source="html",
+            order=0,
+            text=(
+                "SUNNYVALE, Calif., Feb. 25, 2026 /PRNewswire/ -- Synopsys, Inc. (Nasdaq: SNPS) "
+                "today reported results for its first quarter of fiscal year 2026."
+            ),
+            normalized=g.normalize_for_compare(
+                "SUNNYVALE, Calif., Feb. 25, 2026 /PRNewswire/ -- Synopsys, Inc. (Nasdaq: SNPS) today reported results for its first quarter of fiscal year 2026."
+            ),
+            kind="p",
+            structure_role="paragraph",
+        )
+        comments = g.text_difference_comments(
+            doc,
+            html,
+            0.9,
+            target_name="html",
+            docx_blocks=[doc],
+            target_blocks=[html],
+            match_type="approx",
+            proofread_mode=True,
+        )
+        self.assertTrue(comments)
+        self.assertFalse(any(comment.contents.startswith("The paragraph text is different.") for comment in comments))
+        self.assertTrue(
+            any(
+                comment.contents.startswith("The symbol is different")
+                or comment.contents.startswith("The word is extra in html")
+                for comment in comments
+            )
+        )
+
+    def test_collapse_insert_delete_comment_pairs_merges_simple_number_swap(self) -> None:
+        comments = [
+            g.HtmlComment(order=0, contents="The number is extra in html, 2024. It is not present in word.", token_index=10),
+            g.HtmlComment(order=0, contents="The number is missing in html, 2025 in word.", token_index=10),
+        ]
+        collapsed = g.collapse_insert_delete_comment_pairs(comments)
+        self.assertEqual(len(collapsed), 1)
+        self.assertEqual(
+            collapsed[0].contents,
+            "The number is different, 2024 in html while 2025 in word.",
+        )
+
+    def test_medium_confidence_html_narrative_keeps_number_detail_from_year_change(self) -> None:
+        doc = g.Block(
+            id="d0",
+            source="docx",
+            order=0,
+            text=(
+                "On a non-GAAP basis, net income for the third quarter of fiscal year 2025 was $548.9 million, "
+                "or $3.39 per diluted share, compared to non-GAAP net income of $535.5 million, or $3.43 per "
+                "diluted share, for the third quarter of fiscal year 2025."
+            ),
+            normalized=g.normalize_for_compare(
+                "On a non-GAAP basis, net income for the third quarter of fiscal year 2025 was $548.9 million, "
+                "or $3.39 per diluted share, compared to non-GAAP net income of $535.5 million, or $3.43 per "
+                "diluted share, for the third quarter of fiscal year 2025."
+            ),
+            kind="p",
+            structure_role="paragraph",
+        )
+        html = g.Block(
+            id="h0",
+            source="html",
+            order=0,
+            text=(
+                "On a non-GAAP basis, net income for the third quarter of fiscal year 2025 was $548.9 million, "
+                "or $3.39 per diluted share, compared to non-GAAP net income of $535.5 million, or $3.43 per "
+                "diluted share, for the third quarter of fiscal year 2024."
+            ),
+            normalized=g.normalize_for_compare(
+                "On a non-GAAP basis, net income for the third quarter of fiscal year 2025 was $548.9 million, "
+                "or $3.39 per diluted share, compared to non-GAAP net income of $535.5 million, or $3.43 per "
+                "diluted share, for the third quarter of fiscal year 2024."
+            ),
+            kind="p",
+            structure_role="paragraph",
+        )
+        comments = g.text_difference_comments(
+            doc,
+            html,
+            0.9,
+            target_name="html",
+            docx_blocks=[doc],
+            target_blocks=[html],
+            match_type="approx",
+            proofread_mode=True,
+        )
+        self.assertTrue(comments)
+        self.assertFalse(any(comment.contents.startswith("The paragraph text is different.") for comment in comments))
+        self.assertTrue(any("2024" in comment.contents and "2025" in comment.contents for comment in comments))
+
+    def test_single_unambiguous_numeric_difference_comment_detects_one_year_change(self) -> None:
+        doc_text = (
+            "On a non-GAAP basis, net income for the third quarter of fiscal year 2025 was $548.9 million, "
+            "or $3.39 per diluted share, compared to non-GAAP net income of $535.5 million, or $3.43 per "
+            "diluted share, for the third quarter of fiscal year 2025."
+        )
+        html_text = (
+            "On a non-GAAP basis, net income for the third quarter of fiscal year 2025 was $548.9 million, "
+            "or $3.39 per diluted share, compared to non-GAAP net income of $535.5 million, or $3.43 per "
+            "diluted share, for the third quarter of fiscal year 2024."
+        )
+        comment = g.single_unambiguous_numeric_difference_comment(doc_text, html_text, target_name="html")
+        self.assertIsNotNone(comment)
+        self.assertEqual(comment[0], "The number is different, 2024 in html while 2025 in word.")
+        self.assertIsInstance(comment[1], int)
+
+    def test_single_unambiguous_local_token_comments_detects_singular_plural_change(self) -> None:
+        doc_text = (
+            "(iv) Restructuring charge. We initiate restructuring activities to align our costs to our "
+            "operating plans and business strategies."
+        )
+        html_text = (
+            "(iv) Restructuring charges. We initiate restructuring activities to align our costs to our "
+            "operating plans and business strategies."
+        )
+        comments = g.single_unambiguous_local_token_comments(doc_text, html_text, target_name="html")
+        self.assertEqual(
+            comments,
+            [("The word is different, charges in html while charge in word.", 2)],
+        )
+
+    def test_single_unambiguous_phrase_difference_comments_detects_short_inserted_phrase(self) -> None:
+        doc_text = (
+            "The CODM considers that the CODM believes are directly related to those segments."
+        )
+        html_text = (
+            "The CODM considers the income and expenses that the CODM believes are directly related to those segments."
+        )
+        comments = g.single_unambiguous_phrase_difference_comments(doc_text, html_text, target_name="html")
+        self.assertEqual(
+            comments,
+            [("The words are extra in html, the income and expenses. They are not present in word.", 3)],
+        )
+
+    def test_medium_confidence_html_narrative_keeps_single_local_word_difference(self) -> None:
+        doc = g.Block(
+            id="d0",
+            source="docx",
+            order=0,
+            text=(
+                "(iv) Restructuring charge. We initiate restructuring activities to align our costs to our "
+                "operating plans and business strategies based on then-current economic conditions."
+            ),
+            normalized=g.normalize_for_compare(
+                "(iv) Restructuring charge. We initiate restructuring activities to align our costs to our "
+                "operating plans and business strategies based on then-current economic conditions."
+            ),
+            kind="p",
+            structure_role="paragraph",
+        )
+        html = g.Block(
+            id="h0",
+            source="html",
+            order=0,
+            text=(
+                "(iv) Restructuring charges. We initiate restructuring activities to align our costs to our "
+                "operating plans and business strategies based on then-current economic conditions."
+            ),
+            normalized=g.normalize_for_compare(
+                "(iv) Restructuring charges. We initiate restructuring activities to align our costs to our "
+                "operating plans and business strategies based on then-current economic conditions."
+            ),
+            kind="p",
+            structure_role="paragraph",
+        )
+        comments = g.text_difference_comments(
+            doc,
+            html,
+            0.9,
+            target_name="html",
+            docx_blocks=[doc],
+            target_blocks=[html],
+            match_type="approx",
+            proofread_mode=True,
+        )
+        self.assertEqual(
+            [comment.contents for comment in comments],
+            ["The word is different, charges in html while charge in word."],
+        )
+
+    def test_medium_confidence_html_narrative_keeps_short_inserted_phrase_difference(self) -> None:
+        doc = g.Block(
+            id="d0",
+            source="docx",
+            order=0,
+            text=(
+                "Synopsys provides segment information. The CODM considers that the CODM believes are directly "
+                "related to those segments."
+            ),
+            normalized=g.normalize_for_compare(
+                "Synopsys provides segment information. The CODM considers that the CODM believes are directly "
+                "related to those segments."
+            ),
+            kind="p",
+            structure_role="paragraph",
+        )
+        html = g.Block(
+            id="h0",
+            source="html",
+            order=0,
+            text=(
+                "Synopsys provides segment information. The CODM considers the income and expenses that the CODM "
+                "believes are directly related to those segments."
+            ),
+            normalized=g.normalize_for_compare(
+                "Synopsys provides segment information. The CODM considers the income and expenses that the CODM "
+                "believes are directly related to those segments."
+            ),
+            kind="p",
+            structure_role="paragraph",
+        )
+        comments = g.text_difference_comments(
+            doc,
+            html,
+            0.9,
+            target_name="html",
+            docx_blocks=[doc],
+            target_blocks=[html],
+            match_type="approx",
+            proofread_mode=True,
+        )
+        self.assertEqual(
+            [comment.contents for comment in comments],
+            ["The words are extra in html, the income and expenses. They are not present in word."],
+        )
 
     def test_section_lead_word_difference_is_not_suppressed(self) -> None:
         doc = g.Block(
@@ -1162,6 +1444,37 @@ class CompareHelperTests(unittest.TestCase):
         )
         self.assertTrue(any(comment.contents.startswith("The date is different") for comment in comments))
 
+    def test_medium_confidence_html_paragraph_keeps_clear_word_diff(self) -> None:
+        doc = g.Block(
+            id="d0",
+            source="docx",
+            order=0,
+            text="Availability of Final Financial Statements",
+            normalized=g.normalize_for_compare("Availability of Final Financial Statements"),
+            kind="p",
+            structure_role="paragraph",
+        )
+        html = g.Block(
+            id="h0",
+            source="html",
+            order=0,
+            text="Availability of Final Financial Statement",
+            normalized=g.normalize_for_compare("Availability of Final Financial Statement"),
+            kind="p",
+            structure_role="paragraph",
+        )
+        comments = g.text_difference_comments(
+            doc,
+            html,
+            0.9,
+            target_name="html",
+            docx_blocks=[doc],
+            target_blocks=[html],
+            match_type="approx",
+            proofread_mode=True,
+        )
+        self.assertTrue(any(comment.contents.startswith("The word is different") for comment in comments))
+
     def test_assign_structural_roles_marks_column_headers_and_data_rows(self) -> None:
         blocks = [
             g.Block(id="h0", source="html", order=0, text="Low", normalized=g.normalize_for_compare("Low"), table_cell=True, kind="th", table_pos=(0, 0, 0), row_slot=0),
@@ -1463,6 +1776,39 @@ class CompareHelperTests(unittest.TestCase):
             g.compare_inline_formatting_diffs(doc, html),
             ['DOCX does not have underline on "Results Summary"; HTML has it.'],
         )
+
+    def test_run_level_underline_does_not_false_positive_when_word_runs_split_number(self) -> None:
+        doc = g.Block(
+            id="d",
+            source="docx",
+            order=1,
+            text="Reconciliation of 2024 Targets",
+            normalized=g.normalize_for_compare("Reconciliation of 2024 Targets"),
+            underline=True,
+            runs=[
+                g.InlineRun(text="Reconciliation of ", kind="text", underline=True, source_index=0),
+                g.InlineRun(text="202", kind="text", underline=True, source_index=1),
+                g.InlineRun(text="4", kind="text", underline=True, source_index=2),
+                g.InlineRun(text=" Targets", kind="text", underline=True, source_index=3),
+            ],
+        )
+        html = g.Block(
+            id="h",
+            source="html",
+            order=1,
+            text="Reconciliation of 2024 Targets",
+            normalized=g.normalize_for_compare("Reconciliation of 2024 Targets"),
+            underline=True,
+            runs=[
+                g.InlineRun(
+                    text="Reconciliation of 2024 Targets",
+                    kind="text",
+                    underline=True,
+                    source_index=0,
+                )
+            ],
+        )
+        self.assertEqual(g.compare_inline_formatting_diffs(doc, html), [])
 
     def test_select_best_exact_candidate_prefers_formatting_compatible_title(self) -> None:
         doc = g.Block(

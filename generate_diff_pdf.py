@@ -282,6 +282,14 @@ class HtmlComment:
     token_index: int | None = None
 
 
+EXTRA_COMMENT_RE = re.compile(
+    r"^The (number|word) is extra in ([a-z]+), (.+)\. It is not present in word\.$"
+)
+MISSING_COMMENT_RE = re.compile(
+    r"^The (number|word) is missing in ([a-z]+), (.+) in word\.$"
+)
+
+
 @dataclass
 class BrowserRenderResult:
     blocks: list[Block]
@@ -2907,6 +2915,21 @@ def _block_token_counter(block: Block) -> Counter[str]:
     return counter
 
 
+def _styled_run_segments(block: Block, style: str) -> list[str]:
+    segments: list[str] = []
+    current: list[str] = []
+    for run in block.runs:
+        if _run_style_enabled(run, style):
+            current.append(run.text)
+        else:
+            if current:
+                segments.append("".join(current))
+                current = []
+    if current:
+        segments.append("".join(current))
+    return segments
+
+
 def _run_style_token_counter(
     block: Block,
     style: str,
@@ -2914,10 +2937,8 @@ def _run_style_token_counter(
 ) -> Counter[str]:
     counter: Counter[str] = Counter()
     remaining = Counter(allowed_tokens) if allowed_tokens is not None else None
-    for run in block.runs:
-        if not _run_style_enabled(run, style):
-            continue
-        for token in diff_tokens(run.text):
+    for segment in _styled_run_segments(block, style):
+        for token in diff_tokens(segment):
             if remaining is not None:
                 if remaining[token.normalized] <= 0:
                     continue
@@ -2932,19 +2953,17 @@ def _run_style_excerpt(
     allowed_tokens: Counter[str] | None = None,
 ) -> str | None:
     remaining = Counter(allowed_tokens) if allowed_tokens is not None else None
-    for run in block.runs:
-        if not _run_style_enabled(run, style):
-            continue
+    for segment in _styled_run_segments(block, style):
         if remaining is not None:
             matched_parts: list[str] = []
-            for token in diff_tokens(run.text):
+            for token in diff_tokens(segment):
                 if remaining[token.normalized] <= 0:
                     continue
                 remaining[token.normalized] -= 1
                 matched_parts.append(token.text)
             text = normalize_proof_text(" ".join(matched_parts)).strip()
         else:
-            text = normalize_proof_text(run.text).strip()
+            text = normalize_proof_text(segment).strip()
         if visible_meaningful(text):
             return text[:60]
     return None
@@ -5833,6 +5852,152 @@ def percent_symbol_comment(
     return None
 
 
+def single_unambiguous_numeric_difference_comment(
+    doc_text: str,
+    target_text: str,
+    *,
+    target_name: str,
+) -> tuple[str, int | None] | None:
+    doc_tokens = diff_tokens(doc_text)
+    target_tokens = diff_tokens(target_text)
+    doc_numbers = [(index, token) for index, token in enumerate(doc_tokens) if token.kind == "number"]
+    target_numbers = [(index, token) for index, token in enumerate(target_tokens) if token.kind == "number"]
+    if not doc_numbers or not target_numbers or len(doc_numbers) != len(target_numbers):
+        return None
+    mismatches: list[tuple[int, DiffToken, int, DiffToken]] = []
+    for (doc_index, doc_token), (target_index, target_token) in zip(doc_numbers, target_numbers):
+        if doc_token.normalized != target_token.normalized:
+            mismatches.append((doc_index, doc_token, target_index, target_token))
+    if len(mismatches) != 1:
+        return None
+    _doc_index, doc_token, target_index, target_token = mismatches[0]
+    return (
+        f"The number is different, {comment_token_text(target_token).strip()} in {target_name} "
+        f"while {comment_token_text(doc_token).strip()} in word.",
+        target_index,
+    )
+
+
+def single_unambiguous_local_token_comments(
+    doc_text: str,
+    target_text: str,
+    *,
+    target_name: str,
+) -> list[tuple[str, int | None]] | None:
+    doc_tokens = diff_tokens(doc_text)
+    target_tokens = diff_tokens(target_text)
+    if not doc_tokens or not target_tokens:
+        return None
+    matcher = difflib.SequenceMatcher(
+        a=[token.normalized for token in doc_tokens],
+        b=[token.normalized for token in target_tokens],
+        autojunk=False,
+    )
+    opcodes = matcher.get_opcodes()
+    non_equal = [opcode for opcode in opcodes if opcode[0] != "equal"]
+    if not non_equal or len(non_equal) > 2:
+        return None
+    changed_token_count = sum((i2 - i1) + (j2 - j1) for _tag, i1, i2, j1, j2 in non_equal)
+    if changed_token_count > 4:
+        return None
+    equal_token_count = sum(i2 - i1 for tag, i1, i2, _j1, _j2 in opcodes if tag == "equal")
+    if equal_token_count < max(len(doc_tokens), len(target_tokens)) - 4:
+        return None
+
+    if len(non_equal) == 2:
+        first, second = non_equal
+        if {first[0], second[0]} != {"delete", "insert"}:
+            return None
+        if first[2] != second[1] or first[4] != second[3]:
+            return None
+
+    comments: list[HtmlComment] = []
+    for tag, i1, i2, j1, j2 in non_equal:
+        append_word_level_comments(
+            comments,
+            order=0,
+            doc_text=doc_text,
+            target_text=target_text,
+            target_tokens=target_tokens,
+            doc_slice=doc_tokens[i1:i2],
+            target_slice=target_tokens[j1:j2],
+            target_start=j1,
+            target_name=target_name,
+        )
+    comments = dedupe_html_comments(comments)
+    comments = collapse_insert_delete_comment_pairs(comments)
+    detailed_prefixes = (
+        "The word is different",
+        "The word is extra in html",
+        "The word is missing in html",
+        "The number is different",
+        "The number is extra in html",
+        "The number is missing in html",
+        "The date is different",
+    )
+    if not comments or len(comments) > 2:
+        return None
+    if not all(comment.contents.startswith(detailed_prefixes) for comment in comments):
+        return None
+    return [(comment.contents, comment.token_index) for comment in comments]
+
+
+def phrase_token_text(tokens: list[DiffToken]) -> str:
+    if not tokens:
+        return ""
+    parts: list[str] = []
+    for index, token in enumerate(tokens):
+        if index > 0:
+            parts.append(" ")
+        parts.append(comment_token_text(token).strip())
+    return "".join(parts).strip()
+
+
+def single_unambiguous_phrase_difference_comments(
+    doc_text: str,
+    target_text: str,
+    *,
+    target_name: str,
+) -> list[tuple[str, int | None]] | None:
+    doc_tokens = diff_tokens(doc_text)
+    target_tokens = diff_tokens(target_text)
+    if not doc_tokens or not target_tokens:
+        return None
+    matcher = difflib.SequenceMatcher(
+        a=[token.normalized for token in doc_tokens],
+        b=[token.normalized for token in target_tokens],
+        autojunk=False,
+    )
+    opcodes = matcher.get_opcodes()
+    non_equal = [opcode for opcode in opcodes if opcode[0] != "equal"]
+    if len(non_equal) != 1:
+        return None
+    tag, i1, i2, j1, j2 = non_equal[0]
+    if tag not in {"insert", "delete"}:
+        return None
+    equal_token_count = sum(i2_ - i1_ for tag_, i1_, i2_, _j1, _j2 in opcodes if tag_ == "equal")
+    if equal_token_count < max(len(doc_tokens), len(target_tokens)) - 6:
+        return None
+    if tag == "insert":
+        inserted = target_tokens[j1:j2]
+        if not (2 <= len(inserted) <= 6) or not all(token.kind == "word" for token in inserted):
+            return None
+        phrase = phrase_token_text(inserted)
+        if not phrase:
+            return None
+        return [(f"The words are extra in {target_name}, {phrase}. They are not present in word.", j1)]
+    deleted = doc_tokens[i1:i2]
+    if not (2 <= len(deleted) <= 6) or not all(token.kind == "word" for token in deleted):
+        return None
+    phrase = phrase_token_text(deleted)
+    if not phrase:
+        return None
+    anchor = j1 if target_tokens else None
+    if anchor is not None and target_tokens:
+        anchor = min(max(anchor, 0), len(target_tokens) - 1)
+    return [(f"The words are missing in {target_name}, {phrase} in word.", anchor)]
+
+
 def effective_currency_for_comment(
     block: Block,
     token: DiffToken,
@@ -6251,6 +6416,49 @@ def dedupe_html_comments(comments: list[HtmlComment]) -> list[HtmlComment]:
     return deduped
 
 
+def collapse_insert_delete_comment_pairs(comments: list[HtmlComment]) -> list[HtmlComment]:
+    collapsed: list[HtmlComment] = []
+    index = 0
+    while index < len(comments):
+        current = comments[index]
+        if index + 1 < len(comments):
+            nxt = comments[index + 1]
+            current_extra = EXTRA_COMMENT_RE.match(current.contents)
+            current_missing = MISSING_COMMENT_RE.match(current.contents)
+            next_extra = EXTRA_COMMENT_RE.match(nxt.contents)
+            next_missing = MISSING_COMMENT_RE.match(nxt.contents)
+
+            extra_match = current_extra or next_extra
+            missing_match = current_missing or next_missing
+            if (
+                extra_match is not None
+                and missing_match is not None
+                and extra_match.group(1) == missing_match.group(1)
+                and extra_match.group(2) == missing_match.group(2)
+                and current.order == nxt.order
+            ):
+                subject = extra_match.group(1)
+                target_name = extra_match.group(2)
+                target_value = extra_match.group(3).strip()
+                doc_value = missing_match.group(3).strip()
+                token_index_candidates = [value for value in (current.token_index, nxt.token_index) if value is not None]
+                collapsed.append(
+                    HtmlComment(
+                        order=current.order,
+                        contents=(
+                            f"The {subject} is different, {target_value} in {target_name} "
+                            f"while {doc_value} in word."
+                        ),
+                        token_index=min(token_index_candidates) if token_index_candidates else None,
+                    )
+                )
+                index += 2
+                continue
+        collapsed.append(current)
+        index += 1
+    return collapsed
+
+
 def single_token_target_comments(
     doc_block: Block,
     target_block: Block,
@@ -6550,6 +6758,59 @@ def text_difference_comments(
                 token_index=0 if diff_tokens(compare_target_block.text) else None,
             )
         ]
+    if (
+        target_name == "html"
+        and not compare_doc_block.table_cell
+        and not compare_target_block.table_cell
+    ):
+        numeric_block_token_comment = single_unambiguous_numeric_difference_comment(
+            compare_doc_block.text,
+            compare_target_block.text,
+            target_name=target_name,
+        )
+        if numeric_block_token_comment is not None:
+            contents, token_index = numeric_block_token_comment
+            return [
+                HtmlComment(
+                    order=compare_target_block.order,
+                    contents=contents,
+                    token_index=token_index,
+                )
+            ]
+        if (
+            grouped_match_type is None
+            and not precise_schema_header
+            and compare_doc_block.structure_role == "paragraph"
+            and compare_target_block.structure_role == "paragraph"
+        ):
+            phrase_token_comments = single_unambiguous_phrase_difference_comments(
+                compare_doc_block.text,
+                compare_target_block.text,
+                target_name=target_name,
+            )
+            if phrase_token_comments is not None:
+                return [
+                    HtmlComment(
+                        order=compare_target_block.order,
+                        contents=contents,
+                        token_index=token_index,
+                    )
+                    for contents, token_index in phrase_token_comments
+                ]
+            local_token_comments = single_unambiguous_local_token_comments(
+                compare_doc_block.text,
+                compare_target_block.text,
+                target_name=target_name,
+            )
+            if local_token_comments is not None:
+                return [
+                    HtmlComment(
+                        order=compare_target_block.order,
+                        contents=contents,
+                        token_index=token_index,
+                    )
+                    for contents, token_index in local_token_comments
+                ]
     single_token_comments = single_token_target_comments(
         compare_doc_block,
         compare_target_block,
@@ -6558,6 +6819,16 @@ def text_difference_comments(
     )
     if single_token_comments is not None:
         return single_token_comments
+    if target_name == "html" and prnewswire_only_difference(compare_doc_block.text, compare_target_block.text):
+        pr_tokens = diff_tokens(compare_target_block.text)
+        pr_index = next((index for index, token in enumerate(pr_tokens) if token.normalized == "prnewswire"), None)
+        return [
+            HtmlComment(
+                order=compare_target_block.order,
+                contents="The word is extra in html, PRNewswire. It is not present in word.",
+                token_index=pr_index,
+            )
+        ]
     if target_name == "pdf" and pdf_blocks_equal_after_cleanup(compare_doc_block, compare_target_block):
         if not spacing_only_difference(compare_doc_block.text, compare_target_block.text):
             return formatting_comments
@@ -6588,6 +6859,8 @@ def text_difference_comments(
     if confidence_tier == "weak":
         return []
     if grouped_match_type == "quote" and not exact_like_match_type(match_type):
+        if normalize_proof_text(compare_doc_block.text).strip() == normalize_proof_text(compare_target_block.text).strip():
+            return formatting_comments
         quote_floor = 0.88 if target_name == "html" else 0.8 if target_name == "pdf" else 0.88
         quote_detail = 0.96 if target_name == "html" else 0.9 if target_name == "pdf" else 0.96
         if score < quote_floor:
@@ -6679,6 +6952,7 @@ def text_difference_comments(
 
     comments.extend(contextual_comments)
     comments = dedupe_html_comments(comments)
+    comments = collapse_insert_delete_comment_pairs(comments)
 
     if comments:
         high_signal_comments = [
@@ -6686,15 +6960,55 @@ def text_difference_comments(
             if (
                 comment.contents.startswith("The date is different")
                 or comment.contents.startswith("The number is different")
+                or comment.contents.startswith("The number is extra in html")
+                or comment.contents.startswith("The number is missing in html")
                 or comment.contents.startswith("The currency symbol is different")
                 or comment.contents.startswith("The percent sign is different")
                 or comment.contents.startswith("The symbol is different")
             )
         ]
+        detailed_comment_prefixes = (
+            "The word is different",
+            "The word is extra in html",
+            "The word is missing in html",
+            "The number is different",
+            "The number is extra in html",
+            "The number is missing in html",
+            "The date is different",
+            "The symbol is different",
+            "The currency symbol is different",
+            "The percent sign is different",
+        )
+        detailed_token_comments = [
+            comment for comment in comments if comment.contents.startswith(detailed_comment_prefixes)
+        ]
+        clear_medium_token_details = (
+            target_name == "html"
+            and confidence_tier == "medium"
+            and not precise_schema_header
+            and grouped_match_type is None
+            and not repeated_label_block(compare_doc_block)
+            and not repeated_label_block(compare_target_block)
+            and len(comments) <= 6
+            and (
+                (
+                    not narrative_like
+                    and len(doc_tokens) <= 120
+                    and len(target_tokens) <= 120
+                )
+                or (
+                    narrative_like
+                    and len(comments) <= 4
+                    and all(comment.contents.startswith(detailed_comment_prefixes) for comment in comments)
+                )
+            )
+        )
         if precise_schema_header and formatting_comments:
             comments.extend(formatting_comments)
             comments = dedupe_html_comments(comments)
         if grouped_match_type == "quote":
+            if normalize_proof_text(compare_doc_block.text).strip() == normalize_proof_text(compare_target_block.text).strip():
+                return formatting_comments
             return [
                 HtmlComment(
                     order=target_block.order,
@@ -6703,8 +7017,23 @@ def text_difference_comments(
                 )
             ]
         if confidence_tier == "medium" and not precise_schema_header:
-            if high_signal_comments:
+            if (
+                high_signal_comments
+                and not repeated_label_block(compare_doc_block)
+                and not repeated_label_block(compare_target_block)
+            ):
                 return dedupe_html_comments(high_signal_comments + formatting_comments)
+            if (
+                target_name == "html"
+                and grouped_match_type is None
+                and not repeated_label_block(compare_doc_block)
+                and not repeated_label_block(compare_target_block)
+                and detailed_token_comments
+                and len(detailed_token_comments) <= 4
+            ):
+                return dedupe_html_comments(detailed_token_comments + formatting_comments)
+            if clear_medium_token_details:
+                return dedupe_html_comments(comments + formatting_comments)
             return [
                 HtmlComment(
                     order=target_block.order,
@@ -6735,7 +7064,12 @@ def text_difference_comments(
                     token_index=0 if target_tokens else None,
                 )
             ]
-        if target_name in {"html", "pdf"} and narrative_like and not exact_like_match_type(match_type):
+        if (
+            target_name in {"html", "pdf"}
+            and narrative_like
+            and not exact_like_match_type(match_type)
+            and not (target_name == "html" and clear_medium_token_details)
+        ):
             return [
                 HtmlComment(
                     order=target_block.order,
@@ -6799,17 +7133,6 @@ def text_difference_comments(
 
     if formatting_comments:
         return formatting_comments
-
-    if target_name == "html" and prnewswire_only_difference(compare_doc_block.text, compare_target_block.text):
-        pr_tokens = diff_tokens(compare_target_block.text)
-        pr_index = next((index for index, token in enumerate(pr_tokens) if token.normalized == "prnewswire"), None)
-        return [
-            HtmlComment(
-                order=compare_target_block.order,
-                contents="The word is extra in html, PRNewswire. It is not present in word.",
-                token_index=pr_index,
-            )
-        ]
 
     if target_name == "pdf" and normalize_without_punctuation(compare_doc_block.text) == normalize_without_punctuation(compare_target_block.text):
         return []
