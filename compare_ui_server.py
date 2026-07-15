@@ -11,12 +11,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from generate_diff_pdf import run_compare, run_compare_pdf
+from generate_diff_pdf import run_compare
 
 
 ROOT = Path(__file__).resolve().parent
 INDEX_HTML = ROOT / "compare_ui.html"
-REDESIGN_DEMO_HTML = ROOT / "compare_ui_redesign_demo.html"
 RUNS_DIR = ROOT / "ui_runs"
 RUNS_DIR.mkdir(exist_ok=True)
 
@@ -38,9 +37,6 @@ class CompareHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/":
             self._serve_file(INDEX_HTML, "text/html; charset=utf-8")
-            return
-        if parsed.path == "/demo-redesign":
-            self._serve_file(REDESIGN_DEMO_HTML, "text/html; charset=utf-8")
             return
         if parsed.path == "/api/health":
             self._send_json({"ok": True})
@@ -69,17 +65,11 @@ class CompareHandler(BaseHTTPRequestHandler):
             body = self.rfile.read(content_length)
             payload = json.loads(body.decode("utf-8"))
 
-            mode = str(payload.get("mode", "html")).strip().lower() or "html"
+            mode = "html"
             proofread = bool(payload.get("proofread", False))
-            if mode not in {"html", "pdf"}:
-                self._send_json({"error": "Unsupported compare mode."}, status=HTTPStatus.BAD_REQUEST)
-                return
 
             docx_name = safe_filename(str(payload.get("docx_name", "")), "input.docx")
-            target_name = safe_filename(
-                str(payload.get("target_name", "")),
-                "input.html" if mode == "html" else "input.pdf",
-            )
+            target_name = safe_filename(str(payload.get("target_name", "")), "input.html")
             docx_b64 = str(payload.get("docx_b64", ""))
             target_b64 = str(payload.get("target_b64", ""))
 
@@ -100,23 +90,14 @@ class CompareHandler(BaseHTTPRequestHandler):
             docx_path.write_bytes(base64.b64decode(docx_b64))
             target_path.write_bytes(base64.b64decode(target_b64))
 
-            if mode == "pdf":
-                summary = run_compare_pdf(
-                    docx_path=docx_path,
-                    pdf_path=target_path,
-                    output_path=output_path,
-                    summary_json_path=summary_path,
-                    proofread_mode=proofread,
-                )
-            else:
-                summary = run_compare(
-                    docx_path=docx_path,
-                    html_path=target_path,
-                    output_path=output_path,
-                    summary_json_path=summary_path,
-                    renderer="playwright",
-                    proofread_mode=proofread,
-                )
+            summary = run_compare(
+                docx_path=docx_path,
+                html_path=target_path,
+                output_path=output_path,
+                summary_json_path=summary_path,
+                renderer="playwright",
+                proofread_mode=proofread,
+            )
 
             self._send_json(
                 {

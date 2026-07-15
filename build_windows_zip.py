@@ -18,7 +18,6 @@ WINDOWS_APP_FILES = [
     "Setup DOCX Compare App.bat",
     "Start DOCX Compare App.bat",
     "compare_ui.html",
-    "compare_ui_redesign_demo.html",
     "compare_ui_server.py",
     "generate_diff_pdf.py",
     "launch_compare_app.py",
@@ -79,8 +78,6 @@ def build_windows_zip(zip_path: Path = WINDOWS_ZIP) -> None:
 def validate_windows_zip(zip_path: Path = WINDOWS_ZIP) -> None:
     with zipfile.ZipFile(zip_path) as zf:
         names = zf.namelist()
-        if "windows_app/compare_ui_redesign_demo.html" not in names:
-            raise RuntimeError("Redesign demo file is missing from Windows ZIP.")
         if any("__pycache__" in name for name in names):
             raise RuntimeError("Windows ZIP still contains __pycache__ content.")
         for info in zf.infolist():
@@ -91,9 +88,9 @@ def validate_windows_zip(zip_path: Path = WINDOWS_ZIP) -> None:
     try:
         with zipfile.ZipFile(zip_path) as zf:
             zf.extractall(temp_dir)
-        extracted_demo = temp_dir / "windows_app" / "compare_ui_redesign_demo.html"
-        if not extracted_demo.exists():
-            raise RuntimeError("Validation extract did not produce the redesign demo page.")
+        extracted_server = temp_dir / "windows_app" / "compare_ui_server.py"
+        if not extracted_server.exists():
+            raise RuntimeError("Validation extract did not produce the Windows server file.")
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
